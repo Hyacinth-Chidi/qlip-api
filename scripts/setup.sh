@@ -43,6 +43,37 @@ else
   echo "==> ffmpeg found: $(command -v ffmpeg)"
 fi
 
+# yt-dlp solves YouTube's JS challenges with an external runtime; the server
+# passes --js-runtimes node, so Node must be on PATH (it is, for PM2 itself).
+echo "==> node for yt-dlp JS challenges: $(command -v node) ($(node --version))"
+
+# bgutil PO-token provider — replaces browser cookies for YouTube's bot check.
+# Two parts: an HTTP server (run under PM2 as qlip-pot) and a yt-dlp plugin.
+# Both pinned to one release; bump POT_VERSION to upgrade, then rm -rf the two
+# install dirs and re-run setup.
+POT_VERSION="${POT_VERSION:-2.0.0}"
+POT_DIR="$ROOT/pot-provider"
+PLUGIN_DIR="$ROOT/plugins"
+
+if [ ! -f "$POT_DIR/server/build/main.js" ]; then
+  echo "==> Installing PO-token provider server v$POT_VERSION"
+  rm -rf "$POT_DIR"
+  git clone --quiet --depth 1 --branch "$POT_VERSION" \
+    https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git "$POT_DIR"
+  (cd "$POT_DIR/server" && npm ci --silent && npx tsc)
+else
+  echo "==> PO-token provider server already installed"
+fi
+
+if [ ! -f "$PLUGIN_DIR/bgutil-ytdlp-pot-provider.zip" ]; then
+  echo "==> Installing yt-dlp PO-token plugin v$POT_VERSION"
+  mkdir -p "$PLUGIN_DIR"
+  curl -fL "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/download/$POT_VERSION/bgutil-ytdlp-pot-provider.zip" \
+    -o "$PLUGIN_DIR/bgutil-ytdlp-pot-provider.zip"
+else
+  echo "==> yt-dlp PO-token plugin already installed"
+fi
+
 echo "==> Building TypeScript"
 npm run build
 
@@ -51,7 +82,7 @@ if ! command -v pm2 >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "==> Starting/reloading qlip-api under PM2 (other PM2 apps are untouched)"
+echo "==> Starting/reloading qlip-api + qlip-pot under PM2 (other PM2 apps are untouched)"
 pm2 startOrReload ecosystem.config.cjs
 
 echo "==> Done. Check status with: pm2 status"

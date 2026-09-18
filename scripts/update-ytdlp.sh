@@ -39,6 +39,12 @@ echo "==> yt-dlp version now: $("$YTDLP_BIN" --version)"
 if command -v pm2 >/dev/null 2>&1 && pm2 describe qlip-api >/dev/null 2>&1; then
   echo "==> Restarting only qlip-api"
   pm2 restart qlip-api
+  # Restart the token provider too when present: a stale one is a common
+  # cause of YouTube breaking while every other site still works.
+  if pm2 describe qlip-pot >/dev/null 2>&1; then
+    echo "==> Restarting qlip-pot (PO-token provider)"
+    pm2 restart qlip-pot
+  fi
 else
   echo "!! qlip-api is not running under PM2 yet — run 'npm run setup' first."
 fi

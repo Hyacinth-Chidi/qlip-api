@@ -9,6 +9,8 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const BIN_NAME = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
 const LOCAL_BIN = path.join(REPO_ROOT, 'bin', BIN_NAME);
 const COOKIES_FILE = path.join(REPO_ROOT, 'cookies', 'youtube.txt');
+const PLUGIN_DIR = path.join(REPO_ROOT, 'plugins');
+const JS_RUNTIME = process.env.YTDLP_JS_RUNTIME ?? 'node';
 
 /**
  * Resolves which yt-dlp executable to invoke. Prefers the pinned binary in
@@ -29,6 +31,24 @@ export function resolveYtDlpBin(): string {
  */
 function cookieArgs(): string[] {
   return existsSync(COOKIES_FILE) ? ['--cookies', COOKIES_FILE] : [];
+}
+
+/**
+ * Args every yt-dlp invocation needs for YouTube to work from a server:
+ *
+ * - `--js-runtimes`: yt-dlp must run JavaScript to solve YouTube's signature
+ *   challenges, but only `deno` is enabled out of the box. The VPS has Node,
+ *   so opt it in explicitly — without this, YouTube extraction fails even
+ *   when the bot check passes.
+ * - `--plugin-dirs`: loads the bgutil PO-token plugin from ./plugins (installed
+ *   by scripts/setup.sh). It talks to the `qlip-pot` PM2 process on
+ *   127.0.0.1:4416 to mint the "proof of origin" tokens YouTube demands from
+ *   datacenter IPs instead of a logged-in session's cookies.
+ */
+function commonArgs(): string[] {
+  const args = ['--no-warnings', '--no-playlist', '--js-runtimes', JS_RUNTIME];
+  if (existsSync(PLUGIN_DIR)) args.push('--plugin-dirs', PLUGIN_DIR);
+  return [...args, ...cookieArgs()];
 }
 
 let ffmpegAvailable: boolean | null = null;
@@ -115,13 +135,7 @@ export interface YtDlpInfo {
  * downloading anything.
  */
 export async function extractInfo(url: string): Promise<YtDlpInfo> {
-  const stdout = await runCapture([
-    '-j',
-    '--no-warnings',
-    '--no-playlist',
-    ...cookieArgs(),
-    url,
-  ]);
+  const stdout = await runCapture(['-j', ...commonArgs(), url]);
   return JSON.parse(stdout) as YtDlpInfo;
 }
 
@@ -143,17 +157,7 @@ export interface DownloadHandle {
  */
 export function streamDownload(url: string, formatId: string): DownloadHandle {
   const bin = resolveYtDlpBin();
-  const args = [
-    '-f',
-    formatId,
-    '--no-warnings',
-    '--no-playlist',
-    '--no-part',
-    ...cookieArgs(),
-    '-o',
-    '-',
-    url,
-  ];
+  const args = ['-f', formatId, '--no-part', ...commonArgs(), '-o', '-', url];
 
   const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 

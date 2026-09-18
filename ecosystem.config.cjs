@@ -15,5 +15,16 @@ module.exports = {
       autorestart: true,
       max_memory_restart: '300M',
     },
+    {
+      // bgutil PO-token provider: mints the "proof of origin" tokens YouTube
+      // requires from datacenter IPs, so no browser cookies are needed.
+      // Bound to 127.0.0.1 — only yt-dlp on this box should reach it.
+      name: 'qlip-pot',
+      script: './pot-provider/server/build/main.js',
+      args: '--host 127.0.0.1 --port 4416',
+      instances: 1,
+      autorestart: true,
+      max_memory_restart: '300M',
+    },
   ],
 };

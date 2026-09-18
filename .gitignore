@@ -2,5 +2,7 @@ node_modules/
 dist/
 bin/
 cookies/
+plugins/
+pot-provider/
 .env
 *.log

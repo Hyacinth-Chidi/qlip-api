@@ -21,7 +21,8 @@ npm run setup
 2. Downloads the `yt-dlp` binary into `./bin/` **only if it's not already there** — it will never overwrite an existing binary.
 3. Warns if `ffmpeg` isn't installed (one-time `apt-get install ffmpeg`, not managed by this repo). **Install it** — without it, any quality that needs merged video+audio streams (most resolutions above the lowest progressive tier) will be refused by `/api/download` rather than served broken.
 4. Builds TypeScript.
-5. Runs `pm2 startOrReload ecosystem.config.cjs`, which starts (or zero-downtime-reloads) the `qlip-api` process only. Any other apps already running under the same PM2 daemon are untouched — PM2 manages processes independently by name.
+5. Installs the PO-token provider and yt-dlp plugin if missing (see below).
+6. Runs `pm2 startOrReload ecosystem.config.cjs`, which starts (or zero-downtime-reloads) `qlip-api` and `qlip-pot` only. Any other apps already running under the same PM2 daemon are untouched — PM2 manages processes independently by name.
 
 ## Updating yt-dlp when a platform changes its tokens
 
@@ -33,18 +34,25 @@ npm run update-ytdlp
 
 This runs yt-dlp's own self-updater (falling back to a fresh binary download if that fails), then restarts only the `qlip-api` PM2 process. Nothing else on the box is touched.
 
-## YouTube cookies (required for YouTube to work from a VPS)
+## Getting YouTube to work from a VPS (no cookies needed)
 
-YouTube blocks requests from datacenter IPs with `Sign in to confirm you're not a bot` unless yt-dlp presents cookies from a real logged-in browser session. Without this, `/api/extract` and `/api/download` will fail with a `422` for every YouTube URL, even though the server itself is working correctly — this is YouTube's anti-bot system rejecting the request, not a bug.
+YouTube rejects requests from datacenter IPs with `Sign in to confirm you're not a bot`, so a fresh VPS returns `422` for every YouTube URL even though the server is working correctly. Two pieces fix this, both installed automatically by `npm run setup`:
 
-**Setup:**
-1. In a browser where you're logged into YouTube, install a cookie-export extension (e.g. "Get cookies.txt LOCALLY") and export cookies for `youtube.com` in Netscape format.
-2. Upload that file to the VPS as `cookies/youtube.txt` (relative to the repo root, e.g. `/var/www/qlip/qlip-api/cookies/youtube.txt`).
-3. That's it — `ytdlp.ts` auto-detects the file and passes `--cookies` to every yt-dlp call. No restart needed beyond the next natural request (the file is checked per-call, not cached at boot).
+**1. A JavaScript runtime.** yt-dlp has to execute JS to solve YouTube's signature challenges. Only `deno` is enabled by default and the standalone binary bundles no runtime, so the server passes `--js-runtimes node` explicitly (override with the `YTDLP_JS_RUNTIME` env var). Node is already on the box for PM2.
 
-**Never commit this file.** It's already in `.gitignore` — it contains your personal YouTube session and must only ever live on the server's disk.
+**2. A PO token provider.** YouTube wants a "proof of origin" token that normally comes from a logged-in browser session. [bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider) mints them locally instead: a small HTTP server on `127.0.0.1:4416` (run under PM2 as **`qlip-pot`**) plus a yt-dlp plugin in `./plugins` that yt-dlp loads via `--plugin-dirs`. `qlip-pot` is bound to localhost — nothing external can reach it, and no firewall rule is needed.
 
-Cookies expire and will need periodic re-export (how often varies; if YouTube extraction starts failing again after previously working, this is the first thing to check — re-export and re-upload).
+Both are pinned to a version in `setup.sh` (`POT_VERSION`) and skipped if already installed. To upgrade:
+
+```bash
+rm -rf pot-provider plugins && npm run setup
+```
+
+If YouTube extraction breaks later, check `pm2 logs qlip-pot` first — if that process is down, tokens can't be minted and YouTube fails while other sites keep working.
+
+### Cookies (fallback only)
+
+If YouTube still blocks the box even with a PO token, drop a browser-exported `cookies.txt` (Netscape format) at `cookies/youtube.txt` and it's picked up automatically. Prefer the PO token route: cookies expire, need periodic re-export, and tie the server's traffic to your personal account. **Never commit that file** — `cookies/` is gitignored.
 
 ## Local development
 
@@ -57,6 +65,6 @@ Requires `yt-dlp` and `ffmpeg` available on your `PATH` locally (e.g. `pip insta
 
 ## PM2 process name
 
-The app is registered as `qlip-api` in `ecosystem.config.cjs`. All commands (`setup`, `update-ytdlp`) only ever start/restart/reload that one named process — never `pm2 restart all`.
+Two processes are registered in `ecosystem.config.cjs`: `qlip-api` (the Fastify server) and `qlip-pot` (the PO-token provider). All commands (`setup`, `update-ytdlp`) only ever start/restart/reload those named processes — never `pm2 restart all`.
 
 The `.cjs` extension is deliberate: `package.json` sets `"type": "module"`, which would make a plain `ecosystem.config.js` parse as ESM, but PM2 loads ecosystem files with `require()`. That mismatch fails silently — PM2 reports `No script path - aborting` with a blank app name rather than a module error.
