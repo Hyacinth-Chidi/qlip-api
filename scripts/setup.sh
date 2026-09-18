@@ -11,7 +11,7 @@ BIN_DIR="$ROOT/bin"
 YTDLP_BIN="$BIN_DIR/yt-dlp"
 
 echo "==> Installing Node dependencies"
-npm install --omit=dev=false
+npm install
 
 echo "==> Ensuring bin/ exists"
 mkdir -p "$BIN_DIR"

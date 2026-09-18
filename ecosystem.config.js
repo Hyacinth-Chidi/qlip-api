@@ -3,7 +3,6 @@ export default {
     {
       name: 'qlip-api',
       script: './dist/server.js',
-      cwd: import.meta.dirname,
       env: {
         NODE_ENV: 'production',
         PORT: process.env.QLIP_PORT || 4477,
