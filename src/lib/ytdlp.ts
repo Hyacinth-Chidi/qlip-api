@@ -11,6 +11,12 @@ const LOCAL_BIN = path.join(REPO_ROOT, 'bin', BIN_NAME);
 const COOKIES_FILE = path.join(REPO_ROOT, 'cookies', 'youtube.txt');
 const PLUGIN_DIR = path.join(REPO_ROOT, 'plugins');
 const JS_RUNTIME = process.env.YTDLP_JS_RUNTIME ?? 'node';
+/**
+ * Parallel fragment downloads per request. Higher isn't automatically better:
+ * it multiplies per-request load on a shared VPS and can trip rate limiting.
+ * 4 is a safe default; tune with YTDLP_CONCURRENT_FRAGMENTS.
+ */
+const CONCURRENT_FRAGMENTS = Number(process.env.YTDLP_CONCURRENT_FRAGMENTS ?? 4);
 
 /**
  * Resolves which yt-dlp executable to invoke. Prefers the pinned binary in
@@ -157,7 +163,23 @@ export interface DownloadHandle {
  */
 export function streamDownload(url: string, formatId: string): DownloadHandle {
   const bin = resolveYtDlpBin();
-  const args = ['-f', formatId, '--no-part', ...commonArgs(), '-o', '-', url];
+  const args = [
+    '-f',
+    formatId,
+    '--no-part',
+    // Pull fragments in parallel. Most targets here (YouTube DASH/HLS) are
+    // fragmented, and a single connection rarely saturates the link — this is
+    // where real download speedup comes from, not from anything client-side.
+    '--concurrent-fragments',
+    String(CONCURRENT_FRAGMENTS),
+    // Retry lost fragments instead of failing the whole stream on one blip.
+    '--fragment-retries',
+    '10',
+    ...commonArgs(),
+    '-o',
+    '-',
+    url,
+  ];
 
   const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
