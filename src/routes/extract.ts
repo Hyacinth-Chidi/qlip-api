@@ -26,12 +26,15 @@ export async function extractRoute(app: FastifyInstance) {
         qualities,
       };
     } catch (err) {
-      request.log.error(err);
       if (err instanceof YtDlpError) {
+        // Log yt-dlp's own stderr — without it the cause (missing Python,
+        // bot detection, unsupported site) is invisible in the logs.
+        request.log.error({ stderr: err.stderr, url }, err.message);
         return reply.code(422).send({
           error: 'Could not extract this link. It may be unsupported, private, or the site changed.',
         });
       }
+      request.log.error(err);
       return reply.code(500).send({ error: 'Unexpected server error.' });
     }
   });

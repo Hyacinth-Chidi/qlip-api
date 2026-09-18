@@ -16,10 +16,20 @@ npm install
 echo "==> Ensuring bin/ exists"
 mkdir -p "$BIN_DIR"
 
+# Pick a standalone release asset that bundles its own Python. The plain
+# "yt-dlp" asset is a zipimport build that needs system Python 3.10+, which
+# isn't guaranteed on a VPS — these don't.
+case "$(uname -m)" in
+  x86_64)           YTDLP_ASSET="yt-dlp_linux" ;;
+  aarch64 | arm64)  YTDLP_ASSET="yt-dlp_linux_aarch64" ;;
+  *)                YTDLP_ASSET="yt-dlp" ;;  # fall back to the Python-dependent build
+esac
+
 if [ ! -f "$YTDLP_BIN" ]; then
-  echo "==> yt-dlp binary not found, downloading latest release"
-  curl -L "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" -o "$YTDLP_BIN"
+  echo "==> yt-dlp binary not found, downloading latest release ($YTDLP_ASSET)"
+  curl -fL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/$YTDLP_ASSET" -o "$YTDLP_BIN"
   chmod +x "$YTDLP_BIN"
+  echo "==> yt-dlp version: $("$YTDLP_BIN" --version)"
 else
   echo "==> yt-dlp binary already present, leaving it as-is (use 'npm run update-ytdlp' to bump it)"
 fi

@@ -10,17 +10,28 @@ YTDLP_BIN="$ROOT/bin/yt-dlp"
 
 mkdir -p "$ROOT/bin"
 
+# Must match the asset selection in setup.sh — standalone builds that bundle
+# their own Python, so no system Python 3.10+ is required.
+case "$(uname -m)" in
+  x86_64)           YTDLP_ASSET="yt-dlp_linux" ;;
+  aarch64 | arm64)  YTDLP_ASSET="yt-dlp_linux_aarch64" ;;
+  *)                YTDLP_ASSET="yt-dlp" ;;
+esac
+
+download_ytdlp() {
+  curl -fL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/$YTDLP_ASSET" -o "$YTDLP_BIN"
+  chmod +x "$YTDLP_BIN"
+}
+
 if [ -f "$YTDLP_BIN" ] && [ -x "$YTDLP_BIN" ]; then
   echo "==> Updating yt-dlp via its built-in self-updater"
   "$YTDLP_BIN" -U || {
-    echo "==> Self-update failed, re-downloading latest release binary instead"
-    curl -L "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" -o "$YTDLP_BIN"
-    chmod +x "$YTDLP_BIN"
+    echo "==> Self-update failed, re-downloading latest release ($YTDLP_ASSET) instead"
+    download_ytdlp
   }
 else
-  echo "==> No existing yt-dlp binary, downloading latest release"
-  curl -L "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" -o "$YTDLP_BIN"
-  chmod +x "$YTDLP_BIN"
+  echo "==> No existing yt-dlp binary, downloading latest release ($YTDLP_ASSET)"
+  download_ytdlp
 fi
 
 echo "==> yt-dlp version now: $("$YTDLP_BIN" --version)"
