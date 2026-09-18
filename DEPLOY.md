@@ -48,7 +48,7 @@ This single command:
 - downloads the `yt-dlp` binary into `./bin/` (only if not already present)
 - warns if `ffmpeg` is missing (should be a no-op if you did step 0)
 - builds TypeScript
-- runs `pm2 startOrReload ecosystem.config.js` — starts (or zero-downtime-reloads) **only** the `qlip-api` process, leaving any other PM2 apps on the box untouched
+- runs `pm2 startOrReload ecosystem.config.cjs` — starts (or zero-downtime-reloads) **only** the `qlip-api` process, leaving any other PM2 apps on the box untouched
 
 **Verify:**
 ```bash

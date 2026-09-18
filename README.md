@@ -21,7 +21,7 @@ npm run setup
 2. Downloads the `yt-dlp` binary into `./bin/` **only if it's not already there** — it will never overwrite an existing binary.
 3. Warns if `ffmpeg` isn't installed (one-time `apt-get install ffmpeg`, not managed by this repo). **Install it** — without it, any quality that needs merged video+audio streams (most resolutions above the lowest progressive tier) will be refused by `/api/download` rather than served broken.
 4. Builds TypeScript.
-5. Runs `pm2 startOrReload ecosystem.config.js`, which starts (or zero-downtime-reloads) the `qlip-api` process only. Any other apps already running under the same PM2 daemon are untouched — PM2 manages processes independently by name.
+5. Runs `pm2 startOrReload ecosystem.config.cjs`, which starts (or zero-downtime-reloads) the `qlip-api` process only. Any other apps already running under the same PM2 daemon are untouched — PM2 manages processes independently by name.
 
 ## Updating yt-dlp when a platform changes its tokens
 
@@ -44,4 +44,6 @@ Requires `yt-dlp` and `ffmpeg` available on your `PATH` locally (e.g. `pip insta
 
 ## PM2 process name
 
-The app is registered as `qlip-api` in `ecosystem.config.js`. All commands (`setup`, `update-ytdlp`) only ever start/restart/reload that one named process — never `pm2 restart all`.
+The app is registered as `qlip-api` in `ecosystem.config.cjs`. All commands (`setup`, `update-ytdlp`) only ever start/restart/reload that one named process — never `pm2 restart all`.
+
+The `.cjs` extension is deliberate: `package.json` sets `"type": "module"`, which would make a plain `ecosystem.config.js` parse as ESM, but PM2 loads ecosystem files with `require()`. That mismatch fails silently — PM2 reports `No script path - aborting` with a blank app name rather than a module error.

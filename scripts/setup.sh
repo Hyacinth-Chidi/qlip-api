@@ -42,6 +42,6 @@ if ! command -v pm2 >/dev/null 2>&1; then
 fi
 
 echo "==> Starting/reloading qlip-api under PM2 (other PM2 apps are untouched)"
-pm2 startOrReload ecosystem.config.js
+pm2 startOrReload ecosystem.config.cjs
 
 echo "==> Done. Check status with: pm2 status"
