@@ -33,6 +33,19 @@ npm run update-ytdlp
 
 This runs yt-dlp's own self-updater (falling back to a fresh binary download if that fails), then restarts only the `qlip-api` PM2 process. Nothing else on the box is touched.
 
+## YouTube cookies (required for YouTube to work from a VPS)
+
+YouTube blocks requests from datacenter IPs with `Sign in to confirm you're not a bot` unless yt-dlp presents cookies from a real logged-in browser session. Without this, `/api/extract` and `/api/download` will fail with a `422` for every YouTube URL, even though the server itself is working correctly — this is YouTube's anti-bot system rejecting the request, not a bug.
+
+**Setup:**
+1. In a browser where you're logged into YouTube, install a cookie-export extension (e.g. "Get cookies.txt LOCALLY") and export cookies for `youtube.com` in Netscape format.
+2. Upload that file to the VPS as `cookies/youtube.txt` (relative to the repo root, e.g. `/var/www/qlip/qlip-api/cookies/youtube.txt`).
+3. That's it — `ytdlp.ts` auto-detects the file and passes `--cookies` to every yt-dlp call. No restart needed beyond the next natural request (the file is checked per-call, not cached at boot).
+
+**Never commit this file.** It's already in `.gitignore` — it contains your personal YouTube session and must only ever live on the server's disk.
+
+Cookies expire and will need periodic re-export (how often varies; if YouTube extraction starts failing again after previously working, this is the first thing to check — re-export and re-upload).
+
 ## Local development
 
 ```bash

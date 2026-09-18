@@ -8,6 +8,7 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
 const BIN_NAME = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
 const LOCAL_BIN = path.join(REPO_ROOT, 'bin', BIN_NAME);
+const COOKIES_FILE = path.join(REPO_ROOT, 'cookies', 'youtube.txt');
 
 /**
  * Resolves which yt-dlp executable to invoke. Prefers the pinned binary in
@@ -17,6 +18,17 @@ const LOCAL_BIN = path.join(REPO_ROOT, 'bin', BIN_NAME);
 export function resolveYtDlpBin(): string {
   if (existsSync(LOCAL_BIN)) return LOCAL_BIN;
   return BIN_NAME; // fall back to PATH (e.g. local dev via `pip install yt-dlp` / brew)
+}
+
+/**
+ * Sites like YouTube block requests from datacenter IPs with "Sign in to
+ * confirm you're not a bot" unless a real logged-in session's cookies are
+ * attached. If ./cookies/youtube.txt exists (exported from a browser, never
+ * committed to git), pass it along; otherwise omit the flag entirely so
+ * sites that don't need cookies keep working without one.
+ */
+function cookieArgs(): string[] {
+  return existsSync(COOKIES_FILE) ? ['--cookies', COOKIES_FILE] : [];
 }
 
 let ffmpegAvailable: boolean | null = null;
@@ -107,6 +119,7 @@ export async function extractInfo(url: string): Promise<YtDlpInfo> {
     '-j',
     '--no-warnings',
     '--no-playlist',
+    ...cookieArgs(),
     url,
   ]);
   return JSON.parse(stdout) as YtDlpInfo;
@@ -136,6 +149,7 @@ export function streamDownload(url: string, formatId: string): DownloadHandle {
     '--no-warnings',
     '--no-playlist',
     '--no-part',
+    ...cookieArgs(),
     '-o',
     '-',
     url,
