@@ -135,15 +135,13 @@ export function buildQualityOptions(info: YtDlpInfo): QualityOption[] {
     .filter((t): t is { label: string; height: number } => t.height !== undefined)
     .map(({ label, height }) => {
       const f = byHeight.get(height)!;
+      const merged = !(f.acodec && f.acodec !== 'none') && Boolean(bestAudio);
       return {
-        id:
-          f.acodec && f.acodec !== 'none'
-            ? f.format_id
-            : bestAudio
-              ? `${f.format_id}+${bestAudio.format_id}`
-              : f.format_id,
+        id: merged ? `${f.format_id}+${bestAudio!.format_id}` : f.format_id,
         label: `${label} (${height}p)`,
-        ext: f.ext,
+        // Merged streams are always muxed to MP4 by the download route,
+        // whatever container the source video came in.
+        ext: merged ? 'mp4' : f.ext,
         approxSizeBytes: estimateSize(f, info.duration),
         kind: 'video' as const,
       };
@@ -181,14 +179,13 @@ export function buildQualityOptions(info: YtDlpInfo): QualityOption[] {
       totalBytes < smallestExisting * 0.7;
 
     if (worthOffering) {
+      const merged = !hasOwnAudio && Boolean(compactAudio);
       options.push({
-        id: hasOwnAudio
-          ? compactFormat.format_id
-          : compactAudio
-            ? `${compactFormat.format_id}+${compactAudio.format_id}`
-            : compactFormat.format_id,
+        id: merged
+          ? `${compactFormat.format_id}+${compactAudio!.format_id}`
+          : compactFormat.format_id,
         label: `Compact (${compactHeight}p)`,
-        ext: compactFormat.ext,
+        ext: merged ? 'mp4' : compactFormat.ext,
         approxSizeBytes: totalBytes,
         kind: 'video',
       });

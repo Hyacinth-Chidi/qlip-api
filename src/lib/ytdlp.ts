@@ -224,6 +224,16 @@ export function streamDownload(
     ...(playlistItem
       ? ['--yes-playlist', '--playlist-items', String(playlistItem)]
       : ['--no-playlist']),
+    // When ffmpeg muxes to stdout, yt-dlp hardcodes the container to MPEG-TS
+    // (downloader/external.py, `ext == 'mp4' and tmpfilename == '-'`). TS
+    // cannot carry VP9, which Instagram uses for every format and YouTube for
+    // its 4K/2K tiers — the result plays audio over a black picture. These
+    // output args are appended after that default, and ffmpeg honours the
+    // last `-f`, so this switches to fragmented MP4: streamable without a
+    // seekable output, and it carries VP9, H.264, AAC and Opus. Ignored
+    // entirely for direct (non-ffmpeg) downloads.
+    '--downloader-args',
+    'ffmpeg_o:-f mp4 -movflags frag_keyframe+empty_moov+default_base_moof',
     ...commonArgs(),
     '-o',
     '-',
