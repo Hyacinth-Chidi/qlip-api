@@ -103,7 +103,10 @@ function runCapture(args: string[]): Promise<string> {
     });
 
     child.on('close', (code) => {
-      if (code !== 0) {
+      // With --ignore-errors yt-dlp exits non-zero when any item failed, even
+      // though the items that succeeded are on stdout. Trust the output when
+      // there is some, and let the caller decide whether it's usable.
+      if (code !== 0 && !stdout.trim()) {
         reject(new YtDlpError(`yt-dlp exited with code ${code}`, stderr));
         return;
       }
@@ -165,6 +168,10 @@ export async function extractInfo(
     // Carousels are small; this caps pathological cases like a whole profile.
     '--playlist-end',
     '50',
+    // A mixed post (videos + photos) errors on each photo slide, since
+    // yt-dlp finds no formats for them. Without this the whole extraction
+    // fails and the usable videos are lost too.
+    '--ignore-errors',
     ...commonArgs(),
     url,
   ]);

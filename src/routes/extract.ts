@@ -37,11 +37,17 @@ export async function extractRoute(app: FastifyInstance) {
       const info = await extractInfo(url);
 
       if (isPlaylist(info)) {
-        const entries = (info.entries ?? []).filter(Boolean);
+        const all = info.entries ?? [];
+        const entries = all.filter(Boolean);
         if (entries.length === 0) {
-          return reply
-            .code(422)
-            .send({ error: 'Nothing downloadable was found at this link.' });
+          // yt-dlp indexes photo slides but produces no formats for them
+          // (yt-dlp#7569), so an all-photo post yields only null entries.
+          return reply.code(422).send({
+            error:
+              all.length > 0
+                ? 'This post only contains photos, which cannot be downloaded yet. Video posts and reels work.'
+                : 'Nothing downloadable was found at this link.',
+          });
         }
 
         // A "playlist" of one is just single media wrapped — flatten it so the
