@@ -1,9 +1,29 @@
 import type { FastifyInstance } from 'fastify';
-import { extractInfo, YtDlpError } from '../lib/ytdlp.js';
+import {
+  extractInfo,
+  isPlaylist,
+  YtDlpError,
+  type YtDlpInfo,
+} from '../lib/ytdlp.js';
 import { buildQualityOptions } from '../lib/formats.js';
 
 interface ExtractBody {
   url?: string;
+}
+
+/** One selectable item of a multi-media post. */
+function toMediaItem(entry: YtDlpInfo, index: number) {
+  const qualities = buildQualityOptions(entry);
+  return {
+    // 1-based, matching yt-dlp's --playlist-items indexing.
+    index: index + 1,
+    title: entry.title,
+    thumbnail: entry.thumbnail ?? null,
+    duration: entry.duration ?? null,
+    // Images have no duration and only a single "format".
+    kind: entry.duration ? ('video' as const) : ('image' as const),
+    qualities,
+  };
 }
 
 export async function extractRoute(app: FastifyInstance) {
@@ -15,15 +35,47 @@ export async function extractRoute(app: FastifyInstance) {
 
     try {
       const info = await extractInfo(url);
-      const qualities = buildQualityOptions(info);
+
+      if (isPlaylist(info)) {
+        const entries = (info.entries ?? []).filter(Boolean);
+        if (entries.length === 0) {
+          return reply
+            .code(422)
+            .send({ error: 'Nothing downloadable was found at this link.' });
+        }
+
+        // A "playlist" of one is just single media wrapped — flatten it so the
+        // app doesn't show a one-item picker.
+        if (entries.length === 1) {
+          const only = entries[0];
+          return {
+            type: 'single' as const,
+            title: only.title,
+            thumbnail: only.thumbnail ?? null,
+            duration: only.duration ?? null,
+            sourceExtractor: only.extractor_key ?? info.extractor_key,
+            sourceUrl: only.webpage_url ?? info.webpage_url,
+            qualities: buildQualityOptions(only),
+          };
+        }
+
+        return {
+          type: 'multi' as const,
+          title: info.title,
+          sourceExtractor: info.extractor_key,
+          sourceUrl: info.webpage_url,
+          items: entries.map(toMediaItem),
+        };
+      }
 
       return {
+        type: 'single' as const,
         title: info.title,
         thumbnail: info.thumbnail ?? null,
         duration: info.duration ?? null,
         sourceExtractor: info.extractor_key,
         sourceUrl: info.webpage_url,
-        qualities,
+        qualities: buildQualityOptions(info),
       };
     } catch (err) {
       if (err instanceof YtDlpError) {

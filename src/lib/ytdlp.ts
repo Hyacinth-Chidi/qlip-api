@@ -52,7 +52,7 @@ function cookieArgs(): string[] {
  *   datacenter IPs instead of a logged-in session's cookies.
  */
 function commonArgs(): string[] {
-  const args = ['--no-warnings', '--no-playlist', '--js-runtimes', JS_RUNTIME];
+  const args = ['--no-warnings', '--js-runtimes', JS_RUNTIME];
   if (existsSync(PLUGIN_DIR)) args.push('--plugin-dirs', PLUGIN_DIR);
   return [...args, ...cookieArgs()];
 }
@@ -126,6 +126,20 @@ export interface YtDlpFormat {
   format_note?: string;
 }
 
+/**
+ * `-J` returns a playlist wrapper when a URL holds several items (an
+ * Instagram/TikTok image carousel, for example) and a plain info object
+ * otherwise, so one call covers both shapes.
+ */
+export interface YtDlpPlaylist {
+  _type: 'playlist';
+  id: string;
+  title: string;
+  webpage_url: string;
+  extractor_key: string;
+  entries: YtDlpInfo[];
+}
+
 export interface YtDlpInfo {
   id: string;
   title: string;
@@ -137,12 +151,29 @@ export interface YtDlpInfo {
 }
 
 /**
- * Runs `yt-dlp -j <url>` to extract metadata + available formats without
- * downloading anything.
+ * Extracts metadata without downloading. Uses `-J` with playlists allowed so
+ * multi-item posts (image carousels) come back as a playlist of entries;
+ * single media still comes back as one info object.
  */
-export async function extractInfo(url: string): Promise<YtDlpInfo> {
-  const stdout = await runCapture(['-j', ...commonArgs(), url]);
-  return JSON.parse(stdout) as YtDlpInfo;
+export async function extractInfo(
+  url: string
+): Promise<YtDlpInfo | YtDlpPlaylist> {
+  const stdout = await runCapture([
+    '-J',
+    '--yes-playlist',
+    // Carousels are small; this caps pathological cases like a whole profile.
+    '--playlist-end',
+    '50',
+    ...commonArgs(),
+    url,
+  ]);
+  return JSON.parse(stdout) as YtDlpInfo | YtDlpPlaylist;
+}
+
+export function isPlaylist(
+  info: YtDlpInfo | YtDlpPlaylist
+): info is YtDlpPlaylist {
+  return (info as YtDlpPlaylist)._type === 'playlist';
 }
 
 export interface DownloadHandle {
@@ -161,7 +192,12 @@ export interface DownloadHandle {
  * temp files of its own choosing (typically /tmp), which it cleans up itself
  * once the muxed output has been written to stdout.
  */
-export function streamDownload(url: string, formatId: string): DownloadHandle {
+export function streamDownload(
+  url: string,
+  formatId: string,
+  /** 1-based index of a carousel item; omitted for single media. */
+  playlistItem?: number
+): DownloadHandle {
   const bin = resolveYtDlpBin();
   const args = [
     '-f',
@@ -175,6 +211,11 @@ export function streamDownload(url: string, formatId: string): DownloadHandle {
     // Retry lost fragments instead of failing the whole stream on one blip.
     '--fragment-retries',
     '10',
+    // A download always targets exactly one item: either the single media at
+    // this URL, or one specific entry of a carousel.
+    ...(playlistItem
+      ? ['--yes-playlist', '--playlist-items', String(playlistItem)]
+      : ['--no-playlist']),
     ...commonArgs(),
     '-o',
     '-',

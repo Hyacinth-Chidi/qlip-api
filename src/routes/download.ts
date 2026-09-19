@@ -4,6 +4,8 @@ import { streamDownload, requiresMux, isFfmpegAvailable } from '../lib/ytdlp.js'
 interface DownloadQuery {
   url?: string;
   format?: string;
+  /** 1-based carousel item to fetch; omitted for single media. */
+  item?: string;
 }
 
 export async function downloadRoute(app: FastifyInstance) {
@@ -22,7 +24,12 @@ export async function downloadRoute(app: FastifyInstance) {
       });
     }
 
-    const handle = streamDownload(url, formatId);
+    const itemIndex = request.query.item ? Number(request.query.item) : undefined;
+    if (itemIndex !== undefined && (!Number.isInteger(itemIndex) || itemIndex < 1)) {
+      return reply.code(400).send({ error: '"item" must be a positive integer.' });
+    }
+
+    const handle = streamDownload(url, formatId, itemIndex);
 
     // If the client disconnects early, stop the yt-dlp process instead of
     // letting it run to completion for nothing.

@@ -5,7 +5,40 @@ export interface QualityOption {
   label: string; // e.g. "1080p (Full HD)"
   ext: string;
   approxSizeBytes: number | null;
-  kind: 'video' | 'audio';
+  kind: 'video' | 'audio' | 'image';
+}
+
+const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'webp', 'heic', 'gif']);
+
+/**
+ * Image posts have no video or audio codec, so the tiered video logic below
+ * finds nothing. Pick the largest available image instead.
+ */
+function buildImageOptions(info: YtDlpInfo): QualityOption[] {
+  const images = info.formats.filter(
+    (f) =>
+      (!f.vcodec || f.vcodec === 'none') &&
+      (!f.acodec || f.acodec === 'none') &&
+      IMAGE_EXTS.has(f.ext?.toLowerCase())
+  );
+  if (images.length === 0) return [];
+
+  const best = images.reduce((a, b) => {
+    const areaA = (a.height ?? 0) * (Number(a.resolution?.split('x')[0]) || 1);
+    const areaB = (b.height ?? 0) * (Number(b.resolution?.split('x')[0]) || 1);
+    if (areaA || areaB) return areaB > areaA ? b : a;
+    return (b.filesize ?? 0) > (a.filesize ?? 0) ? b : a;
+  });
+
+  return [
+    {
+      id: best.format_id,
+      label: best.height ? `Image (${best.height}p)` : 'Image',
+      ext: best.ext,
+      approxSizeBytes: estimateSize(best),
+      kind: 'image',
+    },
+  ];
 }
 
 function estimateSize(f: YtDlpFormat, durationSec?: number): number | null {
@@ -22,6 +55,12 @@ function estimateSize(f: YtDlpFormat, durationSec?: number): number | null {
  * audio to avoid a mux step where possible.
  */
 export function buildQualityOptions(info: YtDlpInfo): QualityOption[] {
+  // Image posts (carousel slides) carry no video/audio streams at all.
+  const hasPlayableStream = info.formats.some(
+    (f) => (f.vcodec && f.vcodec !== 'none') || (f.acodec && f.acodec !== 'none')
+  );
+  if (!hasPlayableStream) return buildImageOptions(info);
+
   const byHeight = new Map<number, YtDlpFormat>();
   // Lowest-bitrate variant per height. Sites publish several encodes of the
   // same resolution, and the cheapest is often 6-8x smaller than the richest
