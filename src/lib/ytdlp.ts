@@ -116,6 +116,7 @@ export interface YtDlpFormat {
   format_id: string;
   ext: string;
   resolution?: string;
+  width?: number;
   height?: number;
   fps?: number;
   vcodec?: string;

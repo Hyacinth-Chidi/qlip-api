@@ -41,6 +41,20 @@ function buildImageOptions(info: YtDlpInfo): QualityOption[] {
   ];
 }
 
+/**
+ * The dimension that describes a format's quality. People say "1080p" for
+ * both a 1920x1080 landscape video and a 1080x1920 vertical one, so this is
+ * the *shorter* side — using height alone would label a portrait Reel as
+ * "4K (2560p)" when it's really 1440p.
+ */
+function qualityHeight(f: YtDlpFormat): number {
+  const [resW, resH] = (f.resolution ?? '').split('x').map(Number);
+  const width = f.width ?? (Number.isFinite(resW) ? resW : 0);
+  const height = f.height ?? (Number.isFinite(resH) ? resH : 0);
+  if (!height) return 0;
+  return width && width < height ? width : height;
+}
+
 function estimateSize(f: YtDlpFormat, durationSec?: number): number | null {
   if (f.filesize) return f.filesize;
   if (f.filesize_approx) return f.filesize_approx;
@@ -72,7 +86,7 @@ export function buildQualityOptions(info: YtDlpInfo): QualityOption[] {
 
   for (const f of info.formats) {
     if (f.vcodec && f.vcodec !== 'none') {
-      const height = f.height ?? Number(f.resolution?.split('x')[1]) ?? 0;
+      const height = qualityHeight(f);
       if (!height) continue;
       const existing = byHeight.get(height);
       const hasAudio = f.acodec && f.acodec !== 'none';
@@ -103,12 +117,18 @@ export function buildQualityOptions(info: YtDlpInfo): QualityOption[] {
 
   // HD caps at 1080p: it's the middle "good quality" choice, so letting it
   // resolve to 1440p would put it within a hair of the 4K option's size.
+  const hd = pickInBand(720, 1080) ?? pickInBand(1081, 2159);
+  // SD prefers a genuinely watchable small size (360-719). Only when nothing
+  // sits in that range does it fall back to the smallest rung available —
+  // that covers vertical video whose lowest option is 720p, without picking
+  // 144p on a source that offers a full ladder.
+  const sd =
+    pickInBand(360, 719) ??
+    (heights[heights.length - 1] !== hd ? heights[heights.length - 1] : undefined);
   const tiers: { label: string; height: number | undefined }[] = [
     { label: '4K', height: pickInBand(2160, Infinity) },
-    // Falls back into 1081–2159 only when nothing at/below 1080p exists, so a
-    // 1440p-only source still offers an HD choice.
-    { label: 'HD', height: pickInBand(720, 1080) ?? pickInBand(1081, 2159) },
-    { label: 'SD', height: pickInBand(0, 719) },
+    { label: 'HD', height: hd },
+    { label: 'SD', height: sd !== hd ? sd : undefined },
   ];
 
   const options: QualityOption[] = tiers
