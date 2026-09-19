@@ -14,10 +14,13 @@ function humanQualityLabel(f: YtDlpFormat): string {
   }
   const height = f.height ?? Number(f.resolution?.split('x')[1]);
   if (!height) return f.format_note ?? f.format_id;
+  if (height >= 4320) return `${height}p (8K)`;
   if (height >= 2160) return `${height}p (4K)`;
+  if (height >= 1440) return `${height}p (2K)`;
   if (height >= 1080) return `${height}p (Full HD)`;
   if (height >= 720) return `${height}p (HD)`;
-  return `${height}p`;
+  if (height >= 360) return `${height}p (SD)`;
+  return `${height}p (Low)`;
 }
 
 function estimateSize(f: YtDlpFormat, durationSec?: number): number | null {
