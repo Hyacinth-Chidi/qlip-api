@@ -18,12 +18,28 @@ case "$(uname -m)" in
   *)                YTDLP_ASSET="yt-dlp" ;;
 esac
 
+# Site fixes (especially YouTube) land on nightly well before a tagged
+# release. Run `YTDLP_CHANNEL=nightly npm run update-ytdlp` to track those.
+YTDLP_CHANNEL="${YTDLP_CHANNEL:-stable}"
+if [ "$YTDLP_CHANNEL" = "nightly" ]; then
+  RELEASE_REPO="yt-dlp/yt-dlp-nightly-builds"
+else
+  RELEASE_REPO="yt-dlp/yt-dlp"
+fi
+
 download_ytdlp() {
-  curl -fL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/$YTDLP_ASSET" -o "$YTDLP_BIN"
+  curl -fL "https://github.com/$RELEASE_REPO/releases/latest/download/$YTDLP_ASSET" -o "$YTDLP_BIN"
   chmod +x "$YTDLP_BIN"
 }
 
-if [ -f "$YTDLP_BIN" ] && [ -x "$YTDLP_BIN" ]; then
+echo "==> Channel: $YTDLP_CHANNEL ($RELEASE_REPO)"
+
+if [ "$YTDLP_CHANNEL" = "nightly" ]; then
+  # Always re-download for nightly: the self-updater tracks the channel the
+  # binary was built from, so it would keep pulling stable.
+  echo "==> Downloading latest nightly ($YTDLP_ASSET)"
+  download_ytdlp
+elif [ -f "$YTDLP_BIN" ] && [ -x "$YTDLP_BIN" ]; then
   echo "==> Updating yt-dlp via its built-in self-updater"
   "$YTDLP_BIN" -U || {
     echo "==> Self-update failed, re-downloading latest release ($YTDLP_ASSET) instead"
