@@ -209,17 +209,30 @@ export async function extractInfo(
   // when every item failed). runCapture resolves in that case so partial
   // successes survive, so the parse has to be the thing that fails cleanly —
   // otherwise a SyntaxError escapes as a 500 instead of a handled 422.
+  let parsed: unknown;
   try {
-    return JSON.parse(stdout) as YtDlpInfo | YtDlpPlaylist;
+    parsed = JSON.parse(stdout);
   } catch {
     throw new YtDlpError('yt-dlp returned no usable data for this link', stderr);
   }
+
+  // With --ignore-errors a total failure prints the literal `null`, which is
+  // valid JSON — so the parse succeeds and every caller then dereferences a
+  // null. Treat anything that isn't an object as a failed extraction.
+  if (parsed === null || typeof parsed !== 'object') {
+    throw new YtDlpError('yt-dlp could not extract this link', stderr);
+  }
+
+  return parsed as YtDlpInfo | YtDlpPlaylist;
 }
 
 export function isPlaylist(
   info: YtDlpInfo | YtDlpPlaylist
 ): info is YtDlpPlaylist {
-  return (info as YtDlpPlaylist)._type === 'playlist';
+  // Null-safe: yt-dlp can hand back `null` for a failed extraction, and a
+  // bare property read here turned that into a 500 rather than a handled
+  // error.
+  return (info as YtDlpPlaylist | null)?._type === 'playlist';
 }
 
 export interface DownloadHandle {
