@@ -13,6 +13,45 @@ interface DownloadQuery {
   format?: string;
   /** 1-based carousel item to fetch; omitted for single media. */
   item?: string;
+  /** Container the client expects, e.g. "mp4" — shapes the filename/type. */
+  ext?: string;
+  /** Suggested download name, without extension. */
+  name?: string;
+}
+
+/** Content types for the containers this server can return. */
+const MIME_TYPES: Record<string, string> = {
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+  mkv: 'video/x-matroska',
+  m4a: 'audio/mp4',
+  mp3: 'audio/mpeg',
+  opus: 'audio/opus',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+};
+
+/**
+ * Builds the response headers that tell a client what it is receiving.
+ *
+ * Without a real extension and content type, a browser saves the file with no
+ * suffix and the OS can't associate it with a player — the user has to rename
+ * it by hand before anything will open it.
+ */
+function contentHeaders(ext: string | undefined, name: string | undefined) {
+  const safeExt = (ext ?? 'mp4').toLowerCase().replace(/[^a-z0-9]/g, '');
+  // Strip anything that would break the header or escape the filename.
+  const base = (name ?? 'qlip-download')
+    .replace(/[\r\n"\\/]/g, '')
+    .trim()
+    .slice(0, 80);
+
+  return {
+    type: MIME_TYPES[safeExt] ?? 'application/octet-stream',
+    filename: `${base || 'qlip-download'}.${safeExt}`,
+  };
 }
 
 export async function downloadRoute(app: FastifyInstance) {
@@ -29,8 +68,23 @@ export async function downloadRoute(app: FastifyInstance) {
       return reply.code(400).send({ error: '"item" must be a positive integer.' });
     }
 
-    reply.header('Content-Type', 'application/octet-stream');
-    reply.header('Content-Disposition', 'attachment; filename="qlip-download"');
+    // Applied only just before media is sent: setting a media Content-Type
+    // up front makes Fastify refuse to serialise a JSON error body on the
+    // failure paths below.
+    const applyMediaHeaders = () => {
+      // Assembled downloads are always muxed to MP4, whatever the sources were.
+      const { type, filename } = contentHeaders(
+        needsAssembly(formatId) ? 'mp4' : request.query.ext,
+        request.query.name
+      );
+      reply.header('Content-Type', type);
+      reply.header(
+        'Content-Disposition',
+        // RFC 5987 filename* carries non-ASCII names; plain filename is the
+        // fallback for clients that don't understand it.
+        `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`
+      );
+    };
 
     // Plain single-file formats stream straight through: no ffmpeg, no disk,
     // and the file arrives byte-for-byte as the site served it.
@@ -52,6 +106,7 @@ export async function downloadRoute(app: FastifyInstance) {
         request.raw.destroy();
       });
 
+      applyMediaHeaders();
       return reply.send(handle.stream);
     }
 
@@ -94,6 +149,7 @@ export async function downloadRoute(app: FastifyInstance) {
       if (request.raw.destroyed) file.destroy();
     });
 
+    applyMediaHeaders();
     return reply.send(file);
   });
 }

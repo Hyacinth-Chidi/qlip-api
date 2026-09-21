@@ -101,8 +101,16 @@ export async function extractRoute(app: FastifyInstance) {
         // Log yt-dlp's own stderr — without it the cause (missing Python,
         // bot detection, unsupported site) is invisible in the logs.
         request.log.error({ stderr: err.stderr, url }, err.message);
+
+        // Name the real cause when the site is refusing the server's IP,
+        // rather than implying the link itself is at fault.
+        const blocked = /sign in to confirm|not a bot|confirm you'?re/i.test(
+          err.stderr
+        );
         return reply.code(422).send({
-          error: 'Could not extract this link. It may be unsupported, private, or the site changed.',
+          error: blocked
+            ? 'YouTube is blocking this server right now. Other platforms still work.'
+            : 'Could not extract this link. It may be unsupported, private, or the site changed.',
         });
       }
       request.log.error(err);

@@ -99,12 +99,27 @@ export class YtDlpError extends Error {
   }
 }
 
+/**
+ * Caps how long an extraction may run. Trying several player clients means a
+ * blocked site can burn 30s+ before every one is exhausted, which leaves the
+ * app's sheet spinning. Failing at a predictable point is better than a long
+ * wait for the same error.
+ */
+const EXTRACT_TIMEOUT_MS = Number(process.env.YTDLP_EXTRACT_TIMEOUT_MS ?? 20000);
+
 function runCapture(
-  args: string[]
+  args: string[],
+  timeoutMs = EXTRACT_TIMEOUT_MS
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const bin = resolveYtDlpBin();
     const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, timeoutMs);
 
     // Collect as Buffers and decode once. `string += chunk` decodes each
     // chunk independently, which corrupts any multi-byte UTF-8 character
@@ -116,6 +131,7 @@ function runCapture(
     child.stderr.on('data', (chunk: Buffer) => errChunks.push(chunk));
 
     child.on('error', (err) => {
+      clearTimeout(timer);
       reject(
         new YtDlpError(
           `Failed to start yt-dlp: ${err.message}`,
@@ -125,8 +141,19 @@ function runCapture(
     });
 
     child.on('close', (code) => {
+      clearTimeout(timer);
       const stdout = Buffer.concat(outChunks).toString('utf8');
       const stderr = Buffer.concat(errChunks).toString('utf8');
+
+      if (timedOut && !stdout.trim()) {
+        reject(
+          new YtDlpError(
+            `Extraction timed out after ${Math.round(timeoutMs / 1000)}s`,
+            stderr
+          )
+        );
+        return;
+      }
       // With --ignore-errors yt-dlp exits non-zero when any item failed, even
       // though the items that succeeded are on stdout. Trust the output when
       // there is some, and let the caller decide whether it's usable.
