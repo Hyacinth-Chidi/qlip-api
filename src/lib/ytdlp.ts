@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -77,16 +79,7 @@ function commonArgs(): string[] {
 
 let ffmpegAvailable: boolean | null = null;
 
-/**
- * Checks once (then caches) whether ffmpeg is on PATH. A format id containing
- * "+" (e.g. "229+140") tells yt-dlp to merge separate video/audio streams,
- * which requires ffmpeg — without it yt-dlp fails mid-stream after headers
- * are already sent, so callers should check this before starting a muxed
- * download rather than let that happen.
- */
-export function requiresMux(formatId: string): boolean {
-  return formatId.includes('+');
-}
+/** Checks once (then caches) whether ffmpeg is on PATH. */
 
 export async function isFfmpegAvailable(): Promise<boolean> {
   if (ffmpegAvailable !== null) return ffmpegAvailable;
@@ -216,22 +209,30 @@ export interface DownloadHandle {
 }
 
 /**
- * Streams a single format straight to stdout (`-o -`) so the server never
- * writes the final file to disk. When yt-dlp needs to merge separate
- * video+audio streams it still uses ffmpeg under the hood with short-lived
- * temp files of its own choosing (typically /tmp), which it cleans up itself
- * once the muxed output has been written to stdout.
+ * Whether producing this format involves ffmpeg: either two streams to merge
+ * ("137+140") or a manifest (HLS/DASH) to reassemble. Everything else is a
+ * single file yt-dlp copies byte-for-byte.
  */
-export function streamDownload(
+export function needsAssembly(formatId: string): boolean {
+  return (
+    formatId.includes('+') ||
+    formatId.split('+').some((id) => /^(hls|dash|m3u8|http-dash)[-_]/i.test(id))
+  );
+}
+
+function downloadArgs(
   url: string,
   formatId: string,
-  /** 1-based index of a carousel item; omitted for single media. */
-  playlistItem?: number
-): DownloadHandle {
-  const bin = resolveYtDlpBin();
-  const args = [
+  playlistItem: number | undefined,
+  output: string
+): string[] {
+  return [
     '-f',
-    formatId,
+    // Sites like Facebook can hand back different format ids on the second
+    // extraction than on the first, so a bare id can fail with "Requested
+    // format is not available" even though the video is fine. Fall back to
+    // the best single file rather than failing the download outright.
+    `${formatId}/best`,
     '--no-part',
     // Pull fragments in parallel. Most targets here (YouTube DASH/HLS) are
     // fragmented, and a single connection rarely saturates the link — this is
@@ -246,21 +247,31 @@ export function streamDownload(
     ...(playlistItem
       ? ['--yes-playlist', '--playlist-items', String(playlistItem)]
       : ['--no-playlist']),
-    // When ffmpeg muxes to stdout, yt-dlp hardcodes the container to MPEG-TS
-    // (downloader/external.py, `ext == 'mp4' and tmpfilename == '-'`). TS
-    // cannot carry VP9, which Instagram uses for every format and YouTube for
-    // its 4K/2K tiers — the result plays audio over a black picture. These
-    // output args are appended after that default, and ffmpeg honours the
-    // last `-f`, so this switches to fragmented MP4: streamable without a
-    // seekable output, and it carries VP9, H.264, AAC and Opus. Ignored
-    // entirely for direct (non-ffmpeg) downloads.
-    '--downloader-args',
-    'ffmpeg_o:-f mp4 -movflags frag_keyframe+empty_moov+default_base_moof',
     ...commonArgs(),
     '-o',
-    '-',
+    output,
     url,
   ];
+}
+
+/**
+ * Streams a single, self-contained format straight to stdout (`-o -`): the
+ * bytes are copied from the source unchanged, so the file keeps its own
+ * container, index and duration, and nothing touches the server's disk.
+ *
+ * Only for formats where `needsAssembly` is false. Muxing to a pipe can't
+ * produce a valid MP4 — the header goes out before the total length is known,
+ * so the duration reads as 0:00 in the gallery — which is why assembled
+ * formats go through `downloadToTemp` instead.
+ */
+export function streamDownload(
+  url: string,
+  formatId: string,
+  /** 1-based index of a carousel item; omitted for single media. */
+  playlistItem?: number
+): DownloadHandle {
+  const bin = resolveYtDlpBin();
+  const args = downloadArgs(url, formatId, playlistItem, '-');
 
   const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
@@ -283,4 +294,91 @@ export function streamDownload(
     done,
     kill: () => child.kill('SIGKILL'),
   };
+}
+
+const TEMP_PREFIX = 'qlip-';
+
+/**
+ * Deletes temp download directories left behind by a previous process. Each
+ * request removes its own on completion, so anything still here belongs to a
+ * request that was cut off by a crash or restart.
+ */
+export async function sweepOrphanedTempFiles(): Promise<number> {
+  const base = os.tmpdir();
+  let removed = 0;
+  try {
+    for (const name of await readdir(base)) {
+      if (!name.startsWith(TEMP_PREFIX)) continue;
+      await rm(path.join(base, name), { recursive: true, force: true });
+      removed++;
+    }
+  } catch {
+    // /tmp unreadable is not worth failing startup over.
+  }
+  return removed;
+}
+
+export interface TempDownload {
+  /** Absolute path of the finished file. */
+  filePath: string;
+  sizeBytes: number;
+  /** Removes the file and its directory. Safe to call more than once. */
+  cleanup: () => Promise<void>;
+}
+
+/**
+ * Downloads a format that needs assembling (a video+audio merge, or an
+ * HLS/DASH manifest) into a private temp directory, muxed by ffmpeg as a
+ * regular MP4 — with a real index and duration, unlike anything muxed to a
+ * pipe. The caller streams the file back and MUST call `cleanup`; the file
+ * exists only for the length of one request and is never kept.
+ */
+export async function downloadToTemp(
+  url: string,
+  formatId: string,
+  playlistItem?: number
+): Promise<TempDownload> {
+  const dir = await mkdtemp(path.join(os.tmpdir(), TEMP_PREFIX));
+  const cleanup = () => rm(dir, { recursive: true, force: true });
+
+  try {
+    const args = [
+      ...downloadArgs(url, formatId, playlistItem, path.join(dir, 'media.%(ext)s')),
+      // Always land on MP4 regardless of the source containers — VP9, H.264,
+      // AAC and Opus all fit, and it's what the app expects to save.
+      '--merge-output-format',
+      'mp4',
+      // Move the index to the front so the file can start playing before it
+      // has fully transferred to the phone.
+      '--postprocessor-args',
+      'Merger+ffmpeg_o:-movflags +faststart',
+    ];
+
+    const stderr = await new Promise<string>((resolve, reject) => {
+      const child = spawn(resolveYtDlpBin(), args, {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      let err = '';
+      child.stderr.on('data', (chunk) => (err += chunk));
+      child.on('error', (e) =>
+        reject(new YtDlpError(`Failed to start yt-dlp: ${e.message}`, err))
+      );
+      child.on('close', (code) => {
+        if (code !== 0) reject(new YtDlpError(`yt-dlp exited with code ${code}`, err));
+        else resolve(err);
+      });
+    });
+
+    const files = (await readdir(dir)).filter((f) => f.startsWith('media.'));
+    if (files.length === 0) {
+      throw new YtDlpError('yt-dlp finished but produced no file', stderr);
+    }
+    const filePath = path.join(dir, files[0]);
+    const { size } = await stat(filePath);
+
+    return { filePath, sizeBytes: size, cleanup };
+  } catch (err) {
+    await cleanup();
+    throw err;
+  }
 }
