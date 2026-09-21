@@ -55,6 +55,75 @@ function qualityHeight(f: YtDlpFormat): number {
   return width && width < height ? width : height;
 }
 
+/**
+ * Fallback for sites that report no dimensions at all — Facebook labels its
+ * formats "sd"/"hd" with no width, height or resolution. Without this the
+ * tier logic skips every format and the post looks undownloadable.
+ */
+function buildUnsizedOptions(
+  videos: YtDlpFormat[],
+  bestAudio: YtDlpFormat | null,
+  info: YtDlpInfo
+): QualityOption[] {
+  const prettify = (f: YtDlpFormat): string => {
+    const id = (f.format_id ?? '').toLowerCase();
+    if (id === 'hd' || /\bhd\b/.test(id)) return 'HD';
+    if (id === 'sd' || /\bsd\b/.test(id)) return 'SD';
+    return f.format_note || f.format_id || 'Video';
+  };
+
+  // Best first, like the tiered list. Bitrate decides when it's reported;
+  // otherwise fall back to the quality implied by the format name, since
+  // Facebook gives literally nothing else to rank by.
+  const rank = (f: YtDlpFormat): number => {
+    if (f.tbr) return f.tbr;
+    const id = (f.format_id ?? '').toLowerCase();
+    if (/\bhd\b/.test(id)) return 2;
+    if (/\bsd\b/.test(id)) return 1;
+    return 0;
+  };
+  const sorted = [...videos].sort((a, b) => rank(b) - rank(a));
+
+  return sorted.map((f) => {
+    const merged = !hasAudio(f) && Boolean(bestAudio);
+    return {
+      id: merged ? `${f.format_id}+${bestAudio!.format_id}` : f.format_id,
+      label: prettify(f),
+      ext: merged ? 'mp4' : f.ext,
+      approxSizeBytes: estimateSize(f, info.duration),
+      kind: 'video' as const,
+    };
+  });
+}
+
+/**
+ * Codec fields are three-valued: a codec name, the string 'none' meaning the
+ * stream is absent, or undefined meaning yt-dlp didn't report it. X/Twitter's
+ * complete progressive MP4s leave both undefined, so treating undefined as
+ * "absent" would classify a file that has sound as video-only and download it
+ * silently. Unknown therefore means "assume present".
+ */
+function hasVideo(f: YtDlpFormat): boolean {
+  return f.vcodec !== 'none';
+}
+
+function hasAudio(f: YtDlpFormat): boolean {
+  return f.acodec !== 'none';
+}
+
+/** Audio-only: no video stream, but an audio one (known or unreported). */
+function isAudioOnly(f: YtDlpFormat): boolean {
+  return f.vcodec === 'none' && f.acodec !== 'none';
+}
+
+/**
+ * A plain HTTP file rather than a streaming manifest. HLS/DASH have to be
+ * reassembled by ffmpeg, which is fragile when the output is a pipe.
+ */
+function isProgressive(f: YtDlpFormat): boolean {
+  return f.protocol === 'https' || f.protocol === 'http';
+}
+
 function estimateSize(f: YtDlpFormat, durationSec?: number): number | null {
   if (f.filesize) return f.filesize;
   if (f.filesize_approx) return f.filesize_approx;
@@ -71,7 +140,7 @@ function estimateSize(f: YtDlpFormat, durationSec?: number): number | null {
 export function buildQualityOptions(info: YtDlpInfo): QualityOption[] {
   // Image posts (carousel slides) carry no video/audio streams at all.
   const hasPlayableStream = info.formats.some(
-    (f) => (f.vcodec && f.vcodec !== 'none') || (f.acodec && f.acodec !== 'none')
+    (f) => f.vcodec !== 'none' || f.acodec !== 'none'
   );
   if (!hasPlayableStream) return buildImageOptions(info);
 
@@ -84,25 +153,56 @@ export function buildQualityOptions(info: YtDlpInfo): QualityOption[] {
   let bestAudio: YtDlpFormat | null = null;
   let leanAudio: YtDlpFormat | null = null;
 
+  // Ranks a candidate for its resolution tier. Self-contained formats win
+  // (no mux step, and they always have sound), and among equals a direct
+  // progressive download beats HLS — streaming HLS to stdout is unreliable
+  // and produced empty files on X.
+  const score = (f: YtDlpFormat): number =>
+    (hasAudio(f) ? 2 : 0) + (isProgressive(f) ? 1 : 0);
+
   for (const f of info.formats) {
-    if (f.vcodec && f.vcodec !== 'none') {
+    if (hasVideo(f)) {
       const height = qualityHeight(f);
       if (!height) continue;
       const existing = byHeight.get(height);
-      const hasAudio = f.acodec && f.acodec !== 'none';
-      const existingHasAudio = existing?.acodec && existing.acodec !== 'none';
-      // Prefer progressive (video+audio) formats over video-only at the same height.
-      if (!existing || (hasAudio && !existingHasAudio)) {
+      if (!existing || score(f) > score(existing)) {
         byHeight.set(height, f);
       }
 
+      // Compact tracks the cheapest encode, but never trades away a
+      // progressive URL for an HLS one — a smaller file that won't download
+      // is no saving.
       const lean = leanByHeight.get(height);
-      if (f.tbr && (!lean?.tbr || f.tbr < lean.tbr)) {
+      const leanOk =
+        !lean ||
+        (isProgressive(f) === isProgressive(lean)
+          ? (f.tbr ?? Infinity) < (lean.tbr ?? Infinity)
+          : isProgressive(f));
+      if (f.tbr && leanOk) {
         leanByHeight.set(height, f);
       }
-    } else if (f.acodec && f.acodec !== 'none') {
+    } else if (isAudioOnly(f)) {
       if (!bestAudio || (f.tbr ?? 0) > (bestAudio.tbr ?? 0)) bestAudio = f;
       if (f.tbr && (!leanAudio?.tbr || f.tbr < leanAudio.tbr)) leanAudio = f;
+    }
+  }
+
+  // Some sites (Facebook) report no dimensions on any format, so nothing
+  // landed in the tier map. Fall back to listing what's actually on offer.
+  if (byHeight.size === 0) {
+    const videos = info.formats.filter(hasVideo);
+    if (videos.length > 0) {
+      const options = buildUnsizedOptions(videos, bestAudio, info);
+      if (bestAudio) {
+        options.push({
+          id: bestAudio.format_id,
+          label: 'Audio only',
+          ext: bestAudio.ext,
+          approxSizeBytes: estimateSize(bestAudio, info.duration),
+          kind: 'audio',
+        });
+      }
+      return options;
     }
   }
 
@@ -135,7 +235,7 @@ export function buildQualityOptions(info: YtDlpInfo): QualityOption[] {
     .filter((t): t is { label: string; height: number } => t.height !== undefined)
     .map(({ label, height }) => {
       const f = byHeight.get(height)!;
-      const merged = !(f.acodec && f.acodec !== 'none') && Boolean(bestAudio);
+      const merged = !hasAudio(f) && Boolean(bestAudio);
       return {
         id: merged ? `${f.format_id}+${bestAudio!.format_id}` : f.format_id,
         label: `${label} (${height}p)`,
@@ -158,7 +258,7 @@ export function buildQualityOptions(info: YtDlpInfo): QualityOption[] {
 
   if (compactFormat && compactHeight) {
     const compactAudio = leanAudio ?? bestAudio;
-    const hasOwnAudio = compactFormat.acodec && compactFormat.acodec !== 'none';
+    const hasOwnAudio = hasAudio(compactFormat);
     const videoBytes = estimateSize(compactFormat, info.duration);
     const audioBytes = hasOwnAudio
       ? 0

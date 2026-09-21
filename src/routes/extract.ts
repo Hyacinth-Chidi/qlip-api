@@ -6,14 +6,18 @@ import {
   type YtDlpInfo,
 } from '../lib/ytdlp.js';
 import { buildQualityOptions } from '../lib/formats.js';
+import { fillMissingSizes } from '../lib/probe-size.js';
 
 interface ExtractBody {
   url?: string;
 }
 
 /** One selectable item of a multi-media post. */
-function toMediaItem(entry: YtDlpInfo, index: number) {
-  const qualities = buildQualityOptions(entry);
+async function toMediaItem(entry: YtDlpInfo, index: number) {
+  const qualities = await fillMissingSizes(
+    buildQualityOptions(entry),
+    entry.formats
+  );
   return {
     // 1-based, matching yt-dlp's --playlist-items indexing.
     index: index + 1,
@@ -61,7 +65,10 @@ export async function extractRoute(app: FastifyInstance) {
             duration: only.duration ?? null,
             sourceExtractor: only.extractor_key ?? info.extractor_key,
             sourceUrl: only.webpage_url ?? info.webpage_url,
-            qualities: buildQualityOptions(only),
+            qualities: await fillMissingSizes(
+              buildQualityOptions(only),
+              only.formats
+            ),
           };
         }
 
@@ -70,7 +77,7 @@ export async function extractRoute(app: FastifyInstance) {
           title: info.title,
           sourceExtractor: info.extractor_key,
           sourceUrl: info.webpage_url,
-          items: entries.map(toMediaItem),
+          items: await Promise.all(entries.map(toMediaItem)),
         };
       }
 
@@ -81,7 +88,10 @@ export async function extractRoute(app: FastifyInstance) {
         duration: info.duration ?? null,
         sourceExtractor: info.extractor_key,
         sourceUrl: info.webpage_url,
-        qualities: buildQualityOptions(info),
+        qualities: await fillMissingSizes(
+          buildQualityOptions(info),
+          info.formats
+        ),
       };
     } catch (err) {
       if (err instanceof YtDlpError) {

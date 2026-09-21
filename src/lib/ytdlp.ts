@@ -146,6 +146,10 @@ export interface YtDlpFormat {
   filesize_approx?: number | null;
   tbr?: number | null; // total bitrate, kbps — used to estimate size when filesize is absent
   format_note?: string;
+  /** 'https'/'http' for a direct file; 'm3u8_native'/'dash' for manifests. */
+  protocol?: string;
+  /** Direct media URL, present for progressive formats. */
+  url?: string;
 }
 
 /**
