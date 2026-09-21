@@ -46,22 +46,33 @@ export async function fillMissingSizes(
 ): Promise<QualityOption[]> {
   const byId = new Map(formats.map((f) => [f.format_id, f]));
 
-  return Promise.all(
-    options.map(async (option) => {
-      if (option.approxSizeBytes) return option;
+  // A missing size is cosmetic, so nothing in here may fail the request:
+  // every probe is individually guarded and the whole pass falls back to the
+  // original options if anything unexpected throws.
+  try {
+    const results = await Promise.allSettled(
+      options.map(async (option) => {
+        if (option.approxSizeBytes) return option;
 
-      const parts = option.id.split('+').map((id) => byId.get(id));
-      if (parts.some((p) => !p?.url)) return option;
+        const parts = option.id.split('+').map((id) => byId.get(id));
+        if (parts.some((p) => !p?.url)) return option;
 
-      const sizes = await Promise.all(
-        parts.map((p) => headContentLength(p!.url!, timeoutMs))
-      );
-      if (sizes.some((s) => s === null)) return option;
+        const sizes = await Promise.all(
+          parts.map((p) => headContentLength(p!.url!, timeoutMs))
+        );
+        if (sizes.some((s) => s === null)) return option;
 
-      return {
-        ...option,
-        approxSizeBytes: sizes.reduce<number>((sum, s) => sum + s!, 0),
-      };
-    })
-  );
+        return {
+          ...option,
+          approxSizeBytes: sizes.reduce<number>((sum, s) => sum + s!, 0),
+        };
+      })
+    );
+
+    return results.map((r, i) =>
+      r.status === 'fulfilled' ? r.value : options[i]
+    );
+  } catch {
+    return options;
+  }
 }

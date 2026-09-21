@@ -44,12 +44,15 @@ export async function extractRoute(app: FastifyInstance) {
         const all = info.entries ?? [];
         const entries = all.filter(Boolean);
         if (entries.length === 0) {
-          // yt-dlp indexes photo slides but produces no formats for them
-          // (yt-dlp#7569), so an all-photo post yields only null entries.
+          // yt-dlp's Instagram extractor skips any node that isn't a video
+          // (_extract_nodes: `if __typename != 'GraphVideo' ... continue`),
+          // so a photo post counts its slides but discards every one — the
+          // image URLs never reach us. Our own image handling works; there
+          // is simply nothing to hand it. Not fixable server-side.
           return reply.code(422).send({
             error:
               all.length > 0
-                ? 'This post only contains photos, which cannot be downloaded yet. Video posts and reels work.'
+                ? "This post only contains photos. Instagram doesn't share photo files with downloaders — reels and video posts work."
                 : 'Nothing downloadable was found at this link.',
           });
         }

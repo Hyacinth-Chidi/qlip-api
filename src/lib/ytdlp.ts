@@ -99,21 +99,34 @@ export class YtDlpError extends Error {
   }
 }
 
-function runCapture(args: string[]): Promise<string> {
+function runCapture(
+  args: string[]
+): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const bin = resolveYtDlpBin();
     const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (chunk) => (stdout += chunk));
-    child.stderr.on('data', (chunk) => (stderr += chunk));
+    // Collect as Buffers and decode once. `string += chunk` decodes each
+    // chunk independently, which corrupts any multi-byte UTF-8 character
+    // split across a chunk boundary — invisible on small payloads, but
+    // YouTube's metadata runs to hundreds of KB and reliably breaks.
+    const outChunks: Buffer[] = [];
+    const errChunks: Buffer[] = [];
+    child.stdout.on('data', (chunk: Buffer) => outChunks.push(chunk));
+    child.stderr.on('data', (chunk: Buffer) => errChunks.push(chunk));
 
     child.on('error', (err) => {
-      reject(new YtDlpError(`Failed to start yt-dlp: ${err.message}`, stderr));
+      reject(
+        new YtDlpError(
+          `Failed to start yt-dlp: ${err.message}`,
+          Buffer.concat(errChunks).toString('utf8')
+        )
+      );
     });
 
     child.on('close', (code) => {
+      const stdout = Buffer.concat(outChunks).toString('utf8');
+      const stderr = Buffer.concat(errChunks).toString('utf8');
       // With --ignore-errors yt-dlp exits non-zero when any item failed, even
       // though the items that succeeded are on stdout. Trust the output when
       // there is some, and let the caller decide whether it's usable.
@@ -121,7 +134,7 @@ function runCapture(args: string[]): Promise<string> {
         reject(new YtDlpError(`yt-dlp exited with code ${code}`, stderr));
         return;
       }
-      resolve(stdout);
+      resolve({ stdout, stderr });
     });
   });
 }
@@ -177,7 +190,7 @@ export interface YtDlpInfo {
 export async function extractInfo(
   url: string
 ): Promise<YtDlpInfo | YtDlpPlaylist> {
-  const stdout = await runCapture([
+  const { stdout, stderr } = await runCapture([
     '-J',
     '--yes-playlist',
     // Carousels are small; this caps pathological cases like a whole profile.
@@ -190,7 +203,17 @@ export async function extractInfo(
     ...commonArgs(),
     url,
   ]);
-  return JSON.parse(stdout) as YtDlpInfo | YtDlpPlaylist;
+
+  // With --ignore-errors yt-dlp can exit non-zero having written something
+  // other than a complete JSON document (a partial line, or nothing at all
+  // when every item failed). runCapture resolves in that case so partial
+  // successes survive, so the parse has to be the thing that fails cleanly —
+  // otherwise a SyntaxError escapes as a 500 instead of a handled 422.
+  try {
+    return JSON.parse(stdout) as YtDlpInfo | YtDlpPlaylist;
+  } catch {
+    throw new YtDlpError('yt-dlp returned no usable data for this link', stderr);
+  }
 }
 
 export function isPlaylist(
