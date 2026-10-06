@@ -8,17 +8,27 @@ Run everything below on the VPS over SSH, in order. Each step's expected output 
 
 ## 0. One-time prerequisites (skip anything already installed)
 
+On a fresh box, run all of these. On a box that already hosts another Node
+app, you likely only need ffmpeg.
+
 ```bash
-# ffmpeg (required for merging video+audio streams — most qualities need this)
 sudo apt-get update
-sudo apt-get install -y ffmpeg
+
+# Node 20+ — required by the server and by the PO-token provider. Ubuntu's
+# own `nodejs` package is usually too old, so use NodeSource.
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs
+node --version   # expect v22.x
+
+# ffmpeg (merges video+audio; most qualities above the lowest tier need it)
+sudo apt-get install -y ffmpeg git
 ffmpeg -version | head -1
 
-# pm2 (you already have this if your other app runs under it — skip if so)
-npm install -g pm2
+# pm2 process manager
+sudo npm install -g pm2
 
-# certbot with the nginx plugin (skip if you already used it for your other site)
-sudo apt-get install -y certbot python3-certbot-nginx
+# certbot with the nginx plugin, and nginx itself if not present
+sudo apt-get install -y nginx certbot python3-certbot-nginx
 ```
 
 ---
@@ -29,7 +39,7 @@ sudo apt-get install -y certbot python3-certbot-nginx
 sudo mkdir -p /var/www/qlip
 sudo chown $USER:$USER /var/www/qlip
 cd /var/www/qlip
-git clone <YOUR_QLIP_SERVER_GIT_REMOTE> .
+git clone https://github.com/Hyacinth-Chidi/qlip-api.git .
 ```
 
 (If you're pulling into an already-cloned directory instead: `cd /var/www/qlip && git pull`.)
@@ -121,22 +131,46 @@ Do **not** open port 4477 externally — nginx reaches Fastify over `127.0.0.1`,
 
 ## 6. Full live smoke test
 
+Replace `DOMAIN` with your API host.
+
 ```bash
-# health
-curl -s https://qlip-api.techfamz.com/health
+# 1. health
+curl -s https://DOMAIN/health
+# expect: {"ok":true}
 
-# real extraction against a short public video
-curl -s -X POST https://qlip-api.techfamz.com/api/extract \
+# 2. extraction on a platform that doesn't IP-block (use any real reel/post)
+curl -s -X POST https://DOMAIN/api/extract \
   -H "Content-Type: application/json" \
-  -d '{"url":"https://www.youtube.com/watch?v=jNQXAC9IVRw"}'
+  -d '{"url":"https://www.instagram.com/reel/XXXXXXXXX/"}'
+# expect: {"type":"single","title":...,"qualities":[...]}
 
-# real download of a small audio-only format from the extract response's
-# "qualities" list (pick one with "kind":"audio")
-curl -sI "https://qlip-api.techfamz.com/api/download?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3DjNQXAC9IVRw&format=<FORMAT_ID_FROM_EXTRACT>"
-# expect: HTTP/2 200, content-type: application/octet-stream
+# 3. download headers — confirms the file arrives named and typed
+curl -sI "https://DOMAIN/api/download?url=<URL-ENCODED>&format=<ID_FROM_STEP_2>&ext=mp4&name=test"
+# expect: content-type: video/mp4
+#         content-disposition: attachment; filename="test.mp4"
 ```
 
-Once these three succeed, the API is fully live and ready for the app to call.
+### Does YouTube work on this IP?
+
+YouTube blocks most datacenter IPs before returning any stream URLs, which no
+amount of server-side configuration can bypass. A new host may or may not be
+flagged — this is the only way to find out:
+
+```bash
+cd /var/www/qlip
+./bin/yt-dlp -J --no-warnings --js-runtimes node --plugin-dirs ./plugins \
+  "https://youtu.be/jNQXAC9IVRw" >/dev/null 2>/tmp/yt.txt \
+  && echo "YOUTUBE WORKS on this IP" \
+  || grep -oiE "sign in to confirm[^.]*" /tmp/yt.txt
+```
+
+If it prints the "sign in to confirm" line, this IP is flagged. The only
+proven fix is routing yt-dlp through a residential/mobile proxy — datacenter
+proxies are scored the same as the VPS and don't help. Everything else
+(PO tokens, alternate player clients, newer builds) was tried and failed.
+
+Once the first three checks succeed, the API is live for the app, whatever
+YouTube does.
 
 ---
 
