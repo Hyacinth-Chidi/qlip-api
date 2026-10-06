@@ -117,6 +117,20 @@ function isAudioOnly(f: YtDlpFormat): boolean {
 }
 
 /**
+ * H.264 video / AAC audio — the combination every player, phone gallery and
+ * video editor handles. VP9 and AV1 are smaller for the same quality, but a
+ * VP9 track inside an .mp4 is rejected by a lot of consumer software, so it's
+ * only worth taking when the site offers nothing else (Instagram, typically).
+ */
+function isWidelyPlayable(f: YtDlpFormat): boolean {
+  const v = (f.vcodec ?? '').toLowerCase();
+  // Unknown codec usually means a self-contained progressive file, which in
+  // practice is H.264 — treat it as compatible rather than penalising it.
+  if (!v || v === 'none') return true;
+  return v.startsWith('avc') || v.startsWith('h264') || v.startsWith('mp4a');
+}
+
+/**
  * A plain HTTP file rather than a streaming manifest. HLS/DASH have to be
  * reassembled by ffmpeg, which is fragile when the output is a pipe.
  */
@@ -158,7 +172,13 @@ export function buildQualityOptions(info: YtDlpInfo): QualityOption[] {
   // progressive download beats HLS — streaming HLS to stdout is unreliable
   // and produced empty files on X.
   const score = (f: YtDlpFormat): number =>
-    (hasAudio(f) ? 2 : 0) + (isProgressive(f) ? 1 : 0);
+    // Codec compatibility outweighs the rest: a VP9/AV1 file in an .mp4
+    // container is valid but widely unsupported — Windows Media Player,
+    // many gallery apps and most video editors refuse it, which reads to the
+    // user as a corrupt download. H.264 plays everywhere.
+    (isWidelyPlayable(f) ? 4 : 0) +
+    (hasAudio(f) ? 2 : 0) +
+    (isProgressive(f) ? 1 : 0);
 
   for (const f of info.formats) {
     if (hasVideo(f)) {
