@@ -291,11 +291,13 @@ function downloadArgs(
 ): string[] {
   return [
     '-f',
-    // Sites like Facebook can hand back different format ids on the second
-    // extraction than on the first, so a bare id can fail with "Requested
-    // format is not available" even though the video is fine. Fall back to
-    // the best single file rather than failing the download outright.
-    `${formatId}/best`,
+    // Fall back to best H.264 video + AAC audio rather than arbitrary AV1/VP9
+    // formats that fail in VLC and video editing software.
+    `${formatId}/bestvideo[vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[vcodec^=h264]+bestaudio[ext=m4a]/best[ext=mp4]/best`,
+    // Format sort ensures yt-dlp always prioritizes universally compatible
+    // H.264 video and AAC audio across all platforms.
+    '--format-sort',
+    'codec:h264,codec:m4a',
     '--no-part',
     // Pull fragments in parallel. Most targets here (YouTube DASH/HLS) are
     // fragmented, and a single connection rarely saturates the link — this is

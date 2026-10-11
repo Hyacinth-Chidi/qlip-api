@@ -131,6 +131,17 @@ function isWidelyPlayable(f: YtDlpFormat): boolean {
 }
 
 /**
+ * AAC audio (mp4a) inside MP4 is supported by all video editors (Premiere,
+ * DaVinci, CapCut) and players. Opus inside MP4 is frequently rejected or
+ * imported as silent video by video editors.
+ */
+function isWidelyPlayableAudio(f: YtDlpFormat): boolean {
+  const a = (f.acodec ?? '').toLowerCase();
+  const ext = (f.ext ?? '').toLowerCase();
+  return a.startsWith('mp4a') || a.startsWith('aac') || ext === 'm4a';
+}
+
+/**
  * A plain HTTP file rather than a streaming manifest. HLS/DASH have to be
  * reassembled by ffmpeg, which is fragile when the output is a pipe.
  */
@@ -167,18 +178,14 @@ export function buildQualityOptions(info: YtDlpInfo): QualityOption[] {
   let bestAudio: YtDlpFormat | null = null;
   let leanAudio: YtDlpFormat | null = null;
 
-  // Ranks a candidate for its resolution tier. Self-contained formats win
-  // (no mux step, and they always have sound), and among equals a direct
-  // progressive download beats HLS — streaming HLS to stdout is unreliable
-  // and produced empty files on X.
+  // Ranks a candidate for its resolution tier.
+  // Codec compatibility outweighs everything: H.264 (avc1) plays in all video
+  // editors (Premiere, CapCut, DaVinci) and players, whereas AV1 (av01) and VP9
+  // fail in VLC and video editors. Direct progressive HTTPS also beats HLS manifests.
   const score = (f: YtDlpFormat): number =>
-    // Codec compatibility outweighs the rest: a VP9/AV1 file in an .mp4
-    // container is valid but widely unsupported — Windows Media Player,
-    // many gallery apps and most video editors refuse it, which reads to the
-    // user as a corrupt download. H.264 plays everywhere.
-    (isWidelyPlayable(f) ? 4 : 0) +
-    (hasAudio(f) ? 2 : 0) +
-    (isProgressive(f) ? 1 : 0);
+    (isWidelyPlayable(f) ? 10 : 0) +
+    (isProgressive(f) ? 5 : 0) +
+    (hasAudio(f) ? 2 : 0);
 
   for (const f of info.formats) {
     if (hasVideo(f)) {
@@ -191,18 +198,26 @@ export function buildQualityOptions(info: YtDlpInfo): QualityOption[] {
 
       // Compact tracks the cheapest encode, but never trades away a
       // progressive URL for an HLS one — a smaller file that won't download
-      // is no saving.
+      // is no saving. It also demands widely playable codecs (H.264) so it
+      // never hands users an AV1/VP9 video that editors refuse.
       const lean = leanByHeight.get(height);
       const leanOk =
-        !lean ||
-        (isProgressive(f) === isProgressive(lean)
-          ? (f.tbr ?? Infinity) < (lean.tbr ?? Infinity)
-          : isProgressive(f));
+        isWidelyPlayable(f) &&
+        (!lean ||
+          (isProgressive(f) === isProgressive(lean)
+            ? (f.tbr ?? Infinity) < (lean.tbr ?? Infinity)
+            : isProgressive(f)));
       if (f.tbr && leanOk) {
         leanByHeight.set(height, f);
       }
     } else if (isAudioOnly(f)) {
-      if (!bestAudio || (f.tbr ?? 0) > (bestAudio.tbr ?? 0)) bestAudio = f;
+      // Prefer AAC/m4a audio over Opus so video editors don't reject the audio track
+      const audioScore = (a: YtDlpFormat): number =>
+        (isWidelyPlayableAudio(a) ? 10 : 0) +
+        (isProgressive(a) ? 2 : 0) +
+        ((a.tbr ?? 0) / 1000);
+
+      if (!bestAudio || audioScore(f) > audioScore(bestAudio)) bestAudio = f;
       if (f.tbr && (!leanAudio?.tbr || f.tbr < leanAudio.tbr)) leanAudio = f;
     }
   }
