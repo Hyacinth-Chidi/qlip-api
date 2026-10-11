@@ -10,6 +10,7 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         PORT: process.env.QLIP_PORT || 4477,
+        YTDLP_PROXY: process.env.YTDLP_PROXY || 'http://127.0.0.1:40000',
       },
       instances: 1,
       autorestart: true,

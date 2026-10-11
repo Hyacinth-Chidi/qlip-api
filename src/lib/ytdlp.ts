@@ -13,6 +13,9 @@ const LOCAL_BIN = path.join(REPO_ROOT, 'bin', BIN_NAME);
 const COOKIES_FILE = path.join(REPO_ROOT, 'cookies', 'youtube.txt');
 const PLUGIN_DIR = path.join(REPO_ROOT, 'plugins');
 const JS_RUNTIME = process.env.YTDLP_JS_RUNTIME ?? 'node';
+const PROXY_URL =
+  process.env.YTDLP_PROXY ??
+  (process.env.NODE_ENV === 'production' ? 'http://127.0.0.1:40000' : undefined);
 /**
  * Parallel fragment downloads per request. Higher isn't automatically better:
  * it multiplies per-request load on a shared VPS and can trip rate limiting.
@@ -70,6 +73,7 @@ function cookieArgs(): string[] {
  */
 function commonArgs(): string[] {
   const args = ['--no-warnings', '--js-runtimes', JS_RUNTIME];
+  if (PROXY_URL?.trim()) args.push('--proxy', PROXY_URL.trim());
   if (existsSync(PLUGIN_DIR)) args.push('--plugin-dirs', PLUGIN_DIR);
   if (YOUTUBE_CLIENTS.trim()) {
     args.push('--extractor-args', `youtube:player_client=${YOUTUBE_CLIENTS}`);
