@@ -42,15 +42,23 @@ const MIME_TYPES: Record<string, string> = {
  */
 function contentHeaders(ext: string | undefined, name: string | undefined) {
   const safeExt = (ext ?? 'mp4').toLowerCase().replace(/[^a-z0-9]/g, '');
-  // Strip anything that would break the header or escape the filename.
-  const base = (name ?? 'qlip-download')
-    .replace(/[\r\n"\\/]/g, '')
+  // Clean name for UTF-8 header
+  const cleanName = (name ?? 'qlip-download')
+    .replace(/[/\\?%*:|"<>]/g, '')
+    .replace(/[\r\n\t]/g, ' ')
     .trim()
-    .slice(0, 80);
+    .slice(0, 100) || 'qlip-download';
+
+  // Plain ASCII fallback for legacy HTTP parsers
+  const asciiName = cleanName
+    .replace(/[^\x20-\x7E]/g, '')
+    .replace(/["\\]/g, '')
+    .trim() || 'qlip-download';
 
   return {
     type: MIME_TYPES[safeExt] ?? 'application/octet-stream',
-    filename: `${base || 'qlip-download'}.${safeExt}`,
+    filename: `${cleanName}.${safeExt}`,
+    asciiFilename: `${asciiName}.${safeExt}`,
   };
 }
 
@@ -73,16 +81,14 @@ export async function downloadRoute(app: FastifyInstance) {
     // failure paths below.
     const applyMediaHeaders = () => {
       // Assembled downloads are always muxed to MP4, whatever the sources were.
-      const { type, filename } = contentHeaders(
+      const { type, filename, asciiFilename } = contentHeaders(
         needsAssembly(formatId) ? 'mp4' : request.query.ext,
         request.query.name
       );
       reply.header('Content-Type', type);
       reply.header(
         'Content-Disposition',
-        // RFC 5987 filename* carries non-ASCII names; plain filename is the
-        // fallback for clients that don't understand it.
-        `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`
+        `attachment; filename="${asciiFilename}"; filename*=UTF-8''${encodeURIComponent(filename)}`
       );
     };
 
