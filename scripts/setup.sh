@@ -64,8 +64,11 @@ elif command -v python3 >/dev/null 2>&1 && \
      python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
   echo "==> Setting up the extraction worker ($(python3 --version))"
 
-  # Recreate from scratch: an existing directory here is a failed attempt.
-  if [ ! -x "$VENV_PY" ]; then
+  # Rebuild unless the venv has a working pip. The first failed attempt here
+  # left a venv that had an interpreter but no pip (ensurepip was missing),
+  # and testing only for the interpreter let that broken venv survive and
+  # then fail at the install step.
+  if ! "$VENV_PY" -m pip --version >/dev/null 2>&1; then
     rm -rf "$VENV_DIR"
     if ! python3 -m venv "$VENV_DIR" 2>&1 | sed 's/^/   /'; then
       echo "!! venv creation failed. On Debian/Ubuntu install the venv package:"
