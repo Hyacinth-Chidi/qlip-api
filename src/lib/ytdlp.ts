@@ -452,6 +452,70 @@ export async function sweepOrphanedTempFiles(): Promise<number> {
   return removed;
 }
 
+/** Reads the actual video codec from a file, rather than trusting metadata. */
+async function probeVideoCodec(filePath: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const child = spawn(
+      'ffprobe',
+      [
+        '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'stream=codec_name',
+        '-of', 'default=nw=1:nk=1',
+        filePath,
+      ],
+      { stdio: ['ignore', 'pipe', 'ignore'] }
+    );
+    let out = '';
+    child.stdout.on('data', (c) => (out += c));
+    child.on('error', () => resolve(null));
+    child.on('close', () => resolve(out.trim().toLowerCase() || null));
+  });
+}
+
+/** Codecs consumer players and editors reliably refuse. */
+const UNPLAYABLE_CODECS = new Set(['av01', 'av1', 'vp9', 'vp09', 'hevc', 'h265']);
+
+/**
+ * Transcodes to H.264 only when the file really needs it.
+ *
+ * Sites that report no codec (Facebook) can serve anything, and a `-c copy`
+ * remux faithfully preserves whatever that is — which is how an AV1 file
+ * reached VLC and was refused. The metadata can't be trusted, so the finished
+ * file is probed and converted only on an actual mismatch. Files that are
+ * already H.264 are returned untouched, so the common case costs nothing
+ * beyond one fast ffprobe.
+ */
+async function ensurePlayableCodec(filePath: string): Promise<string> {
+  const codec = await probeVideoCodec(filePath);
+  if (!codec || !UNPLAYABLE_CODECS.has(codec)) return filePath;
+
+  const outPath = filePath.replace(/\.[^.]+$/, '') + '.h264.mp4';
+  const ok = await new Promise<boolean>((resolve) => {
+    const child = spawn(
+      'ffmpeg',
+      [
+        '-v', 'error',
+        '-i', filePath,
+        '-c:v', 'libx264',
+        '-preset', 'veryfast',
+        '-crf', '23',
+        // Audio is usually already AAC; copy when it is, convert when not.
+        '-c:a', 'aac',
+        '-movflags', '+faststart',
+        '-y',
+        outPath,
+      ],
+      { stdio: ['ignore', 'ignore', 'ignore'] }
+    );
+    child.on('error', () => resolve(false));
+    child.on('close', (code) => resolve(code === 0));
+  });
+
+  // On failure keep the original: an unplayable file beats no file.
+  return ok && existsSync(outPath) ? outPath : filePath;
+}
+
 export interface TempDownload {
   /** Absolute path of the finished file. */
   filePath: string;
@@ -508,9 +572,10 @@ export async function downloadToTemp(
       throw new YtDlpError('yt-dlp finished but produced no file', stderr);
     }
     const filePath = path.join(dir, files[0]);
-    const { size } = await stat(filePath);
+    const finalPath = await ensurePlayableCodec(filePath);
+    const { size } = await stat(finalPath);
 
-    return { filePath, sizeBytes: size, cleanup };
+    return { filePath: finalPath, sizeBytes: size, cleanup };
   } catch (err) {
     await cleanup();
     throw err;
