@@ -52,10 +52,24 @@ export async function fillMissingSizes(
   try {
     const results = await Promise.allSettled(
       options.map(async (option) => {
-        if (option.approxSizeBytes) return option;
-
         const parts = option.id.split('+').map((id) => byId.get(id));
         if (parts.some((p) => !p?.url)) return option;
+
+        // Only probe plain HTTP files. An HLS/DASH url points at a manifest,
+        // so its Content-Length is the size of a few hundred bytes of text,
+        // not the media — probing those reports ~0 MB.
+        const probeable = parts.every(
+          (p) => p!.protocol === 'https' || p!.protocol === 'http'
+        );
+        if (!probeable) return option;
+
+        // Probe even when a bitrate-derived estimate exists. `tbr` is a peak
+        // or nominal rate, not an average, so for variable-bitrate sources it
+        // can overstate the real file several times over — X advertised
+        // 148 MB for a clip that downloads as 21 MB. Content-Length is the
+        // actual number of bytes the user will receive.
+        const exact = parts.every((p) => p!.filesize);
+        if (exact) return option;
 
         const sizes = await Promise.all(
           parts.map((p) => headContentLength(p!.url!, timeoutMs))

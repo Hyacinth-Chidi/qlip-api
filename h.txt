@@ -1,0 +1,9 @@
+HTTP/1.1 200 OK
+Server: nginx/1.24.0 (Ubuntu)
+Date: Mon, 19 Oct 2026 20:41:17 GMT
+Content-Type: video/mp4
+Transfer-Encoding: chunked
+Connection: keep-alive
+vary: Origin
+content-disposition: attachment; filename="hdtest.mp4"; filename*=UTF-8''hdtest.mp4
+
