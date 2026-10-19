@@ -6,3 +6,4 @@ plugins/
 pot-provider/
 .env
 *.log
+.venv/

@@ -4,6 +4,7 @@ import {
   streamDownload,
   downloadToTemp,
   needsAssembly,
+  needsRemux,
   isFfmpegAvailable,
   YtDlpError,
 } from '../lib/ytdlp.js';
@@ -82,7 +83,7 @@ export async function downloadRoute(app: FastifyInstance) {
     const applyMediaHeaders = () => {
       // Assembled downloads are always muxed to MP4, whatever the sources were.
       const { type, filename, asciiFilename } = contentHeaders(
-        needsAssembly(formatId) ? 'mp4' : request.query.ext,
+        needsAssembly(formatId) || needsRemux(formatId) ? 'mp4' : request.query.ext,
         request.query.name
       );
       reply.header('Content-Type', type);
@@ -92,9 +93,14 @@ export async function downloadRoute(app: FastifyInstance) {
       );
     };
 
+    // Facebook's formats carry no codec information, so a byte-for-byte copy
+    // can produce a file whose real contents don't match the .mp4 label we
+    // put on it. Those go through ffmpeg to be rebuilt as a known-good MP4.
+    const viaFfmpeg = needsAssembly(formatId) || needsRemux(formatId);
+
     // Plain single-file formats stream straight through: no ffmpeg, no disk,
     // and the file arrives byte-for-byte as the site served it.
-    if (!needsAssembly(formatId)) {
+    if (!viaFfmpeg) {
       const handle = streamDownload(url, formatId, itemIndex);
 
       // If the client disconnects early, stop the yt-dlp process instead of

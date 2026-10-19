@@ -52,6 +52,17 @@ fi
 
 echo "==> yt-dlp version now: $("$YTDLP_BIN" --version)"
 
+# The extraction worker uses a pip-installed yt-dlp, which is a separate
+# install from the binary above. Updating only one lets them drift onto
+# different versions, so a link could extract fine but fail to download.
+VENV_PY="$ROOT/.venv/bin/python3"
+if [ -x "$VENV_PY" ]; then
+  echo "==> Updating the worker's yt-dlp package"
+  "$VENV_PY" -m pip install --quiet --upgrade yt-dlp \
+    && echo "==> Worker yt-dlp now: $("$VENV_PY" -m yt_dlp --version)" \
+    || echo "!! Worker pip upgrade failed — versions may now differ from the binary"
+fi
+
 if command -v pm2 >/dev/null 2>&1 && pm2 describe qlip-api >/dev/null 2>&1; then
   echo "==> Restarting only qlip-api"
   pm2 restart qlip-api

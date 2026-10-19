@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { extractWorker } from './extract-worker.js';
 import { existsSync } from 'node:fs';
 import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
@@ -80,6 +81,9 @@ function commonArgs(): string[] {
   }
   return [...args, ...cookieArgs()];
 }
+
+/** Counts worker misses so a permanently-broken worker is visible in logs. */
+let workerFallbacks = 0;
 
 let ffmpegAvailable: boolean | null = null;
 
@@ -218,9 +222,48 @@ export interface YtDlpInfo {
  * multi-item posts (image carousels) come back as a playlist of entries;
  * single media still comes back as one info object.
  */
+/**
+ * The worker equivalents of the CLI flags below. Both paths must behave the
+ * same, or a link would resolve differently depending on which one ran.
+ */
+function workerOpts(): Record<string, unknown> {
+  const opts: Record<string, unknown> = {
+    noplaylist: false,
+    playlistend: 50,
+    ignoreerrors: true,
+    extractor_args: {
+      youtube: { player_client: YOUTUBE_CLIENTS.split(',').filter(Boolean) },
+    },
+  };
+  if (existsSync(COOKIES_FILE)) opts.cookiefile = COOKIES_FILE;
+  return opts;
+}
+
 export async function extractInfo(
   url: string
 ): Promise<YtDlpInfo | YtDlpPlaylist> {
+  // Try the long-lived worker first: it skips yt-dlp's ~1.5s import and
+  // reuses HTTP connections. Any failure falls through to spawning the
+  // binary, which is slower but always available.
+  try {
+    const info = await extractWorker.extract(url, workerOpts());
+    if (info && typeof info === 'object') {
+      return info as YtDlpInfo | YtDlpPlaylist;
+    }
+  } catch (err) {
+    // A genuine extraction failure (private video, bot check) would also
+    // fail when spawned, but the retry is cheap relative to a wrong answer
+    // and keeps worker problems from looking like site problems.
+    workerFallbacks++;
+    if (workerFallbacks === 1 || workerFallbacks % 25 === 0) {
+      console.warn(
+        `[extract] worker unavailable, spawning yt-dlp instead (${workerFallbacks}x): ${
+          (err as Error).message
+        }`
+      );
+    }
+  }
+
   const { stdout, stderr } = await runCapture([
     '-J',
     '--yes-playlist',
@@ -285,6 +328,28 @@ export function needsAssembly(formatId: string): boolean {
     formatId.includes('+') ||
     formatId.split('+').some((id) => /^(hls|dash|m3u8|http-dash)[-_]/i.test(id))
   );
+}
+
+/**
+ * Formats whose bytes we can't vouch for and so must not stream unchanged.
+ *
+ * Most sites tell yt-dlp the codecs and container up front, so a direct copy
+ * is safe. Facebook reports `vcodec`/`acodec` as undefined — it genuinely
+ * doesn't know — yet we still label the result .mp4 and video/mp4. When that
+ * guess is wrong the file is rejected by players and editors even though the
+ * download succeeded. Passing these through ffmpeg with `-c copy` rebuilds a
+ * known-good MP4 container (front-loaded index, correct metadata) in about a
+ * second, without re-encoding or touching quality.
+ */
+export function needsRemux(formatId: string): boolean {
+  // Facebook names its formats exactly "sd"/"hd" and reports no codecs at
+  // all; every other site we support uses structured ids (http-832,
+  // dash-123v, 137+140) and declares what is inside. Rather than re-extract
+  // just to inspect codecs — which would cost seconds on the download path —
+  // match the bare-label shape that identifies the unverifiable case.
+  return formatId
+    .split('+')
+    .some((id) => /^(sd|hd|hd1080|sd480|source|progressive)$/i.test(id.trim()));
 }
 
 function downloadArgs(

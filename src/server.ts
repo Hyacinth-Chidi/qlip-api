@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import { extractRoute } from './routes/extract.js';
 import { downloadRoute } from './routes/download.js';
 import { sweepOrphanedTempFiles } from './lib/ytdlp.js';
+import { extractWorker } from './lib/extract-worker.js';
 
 const PORT = Number(process.env.PORT ?? 4477);
 const HOST = process.env.HOST ?? '0.0.0.0';
@@ -19,6 +20,13 @@ await app.register(cors, { origin: true });
 // Temp files from assembled downloads are removed when their request ends,
 // but a crash or PM2 restart mid-transfer can orphan one. Sweep any left from
 // a previous process so nothing accumulates across restarts.
+// Start the extraction worker up front so the first request doesn't pay the
+// yt-dlp import. Logs its version, making a drift from ./bin/yt-dlp visible.
+void extractWorker.ensureStarted().then((ok) => {
+  if (ok) app.log.info(`extract worker ready (yt-dlp ${extractWorker.version})`);
+  else app.log.warn('extract worker unavailable — spawning yt-dlp per request');
+});
+
 await sweepOrphanedTempFiles().then(
   (n) => n > 0 && app.log.warn(`removed ${n} orphaned temp download(s)`)
 );
