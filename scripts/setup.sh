@@ -52,24 +52,37 @@ echo "==> node for yt-dlp JS challenges: $(command -v node) ($(node --version))"
 # per request. Entirely optional: without it the server spawns the binary as
 # before, just slower.
 VENV_DIR="$ROOT/.venv"
-if [ ! -x "$VENV_DIR/bin/python3" ]; then
-  if command -v python3 >/dev/null 2>&1 && \
+VENV_PY="$VENV_DIR/bin/python3"
+
+# The test is "can the worker import yt-dlp", not "does a .venv directory
+# exist" — a failed `python3 -m venv` still leaves the directory behind, and
+# keying off its presence meant a half-built venv was reported as ready and
+# never repaired.
+if "$VENV_PY" -c 'import yt_dlp' 2>/dev/null; then
+  echo "==> Worker yt-dlp: $("$VENV_PY" -m yt_dlp --version)"
+elif command -v python3 >/dev/null 2>&1 && \
      python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
-    echo "==> Creating Python venv for the extraction worker ($(python3 --version))"
-    if python3 -m venv "$VENV_DIR" 2>/dev/null; then
-      "$VENV_DIR/bin/python3" -m pip install --quiet --upgrade pip yt-dlp \
-        && echo "==> Worker yt-dlp: $("$VENV_DIR/bin/python3" -m yt_dlp --version)" \
-        || echo "!! pip install failed — server will spawn yt-dlp per request instead"
-    else
-      echo "!! venv creation failed (try: sudo apt-get install -y python3-venv)"
-      echo "   Server will spawn yt-dlp per request instead — slower, still works."
+  echo "==> Setting up the extraction worker ($(python3 --version))"
+
+  # Recreate from scratch: an existing directory here is a failed attempt.
+  if [ ! -x "$VENV_PY" ]; then
+    rm -rf "$VENV_DIR"
+    if ! python3 -m venv "$VENV_DIR" 2>&1 | sed 's/^/   /'; then
+      echo "!! venv creation failed. On Debian/Ubuntu install the venv package:"
+      echo "     sudo apt-get install -y python3-venv"
+      echo "   Then re-run 'npm run setup'."
+      echo "   Until then the server spawns yt-dlp per request — slower, still works."
     fi
-  else
-    echo "!! python3 >= 3.10 not found — extraction will spawn yt-dlp per request."
-    echo "   Optional speedup: sudo apt-get install -y python3 python3-venv"
+  fi
+
+  if [ -x "$VENV_PY" ]; then
+    "$VENV_PY" -m pip install --quiet --upgrade pip yt-dlp \
+      && echo "==> Worker yt-dlp: $("$VENV_PY" -m yt_dlp --version)" \
+      || echo "!! pip install failed — server will spawn yt-dlp per request instead"
   fi
 else
-  echo "==> Worker venv present: $("$VENV_DIR/bin/python3" -m yt_dlp --version 2>/dev/null || echo 'yt-dlp missing')"
+  echo "!! python3 >= 3.10 not found — extraction will spawn yt-dlp per request."
+  echo "   Optional speedup: sudo apt-get install -y python3 python3-venv"
 fi
 
 # bgutil PO-token provider — replaces browser cookies for YouTube's bot check.
