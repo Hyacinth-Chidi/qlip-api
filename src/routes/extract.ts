@@ -8,6 +8,7 @@ import {
 import { buildQualityOptions } from '../lib/formats.js';
 import { fillMissingSizes } from '../lib/probe-size.js';
 import { rememberTargets } from '../lib/direct-stream.js';
+import { lookupExtract, rememberExtract } from '../lib/extract-cache.js';
 
 interface ExtractBody {
   url?: string;
@@ -40,8 +41,13 @@ export async function extractRoute(app: FastifyInstance) {
 
     try {
       const t0 = Date.now();
-      const info = await extractInfo(url);
+      // A repeat of a link already resolved skips the whole round trip. The
+      // format lists it returns are the same ones already handed to the app,
+      // so a hit changes latency and nothing else.
+      const cached = lookupExtract(url);
+      const info = cached ?? (await extractInfo(url));
       const extractMs = Date.now() - t0;
+      if (!cached) rememberExtract(url, info);
 
       // Remember where each format's bytes live. The download endpoint can
       // then stream straight from the CDN instead of making yt-dlp resolve
@@ -104,7 +110,12 @@ export async function extractRoute(app: FastifyInstance) {
         info.formats
       );
       request.log.info(
-        { extractMs, sizeProbeMs: Date.now() - sizeStart, options: qualities.length },
+        {
+          extractMs,
+          cacheHit: Boolean(cached),
+          sizeProbeMs: Date.now() - sizeStart,
+          options: qualities.length,
+        },
         'extract complete'
       );
 

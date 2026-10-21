@@ -19,7 +19,19 @@ interface CachedTarget {
   expiresAt: number;
 }
 
-const TTL_MS = 10 * 60 * 1000;
+/**
+ * How long a resolved CDN URL stays usable.
+ *
+ * 10 minutes was a guess made with no data. Signed media URLs from these
+ * sites are good for roughly 6 hours, so an hour is still well inside the
+ * window while making the fast path hit far more often — a user who extracts
+ * a link, scrolls away and comes back no longer pays a full re-resolve.
+ *
+ * An over-long TTL is not a correctness risk either way: an expired URL
+ * returns 403, the download path notices and falls back to yt-dlp, which
+ * mints a fresh one.
+ */
+const TTL_MS = Number(process.env.QLIP_URL_CACHE_TTL_MS ?? 60 * 60 * 1000);
 /** Bounded so a busy server can't grow this without limit. */
 const MAX_ENTRIES = 500;
 
@@ -31,10 +43,11 @@ function key(sourceUrl: string, formatId: string): string {
 
 /** Only plain HTTP files can be proxied; manifests need yt-dlp to assemble. */
 export function isDirectlyStreamable(f: YtDlpFormat): boolean {
+  // Audio-only formats are plain files too, and the audio tier is a real
+  // download option — requiring a video codec here excluded it from the fast
+  // path for no reason.
   return (
-    Boolean(f.url) &&
-    (f.protocol === 'https' || f.protocol === 'http') &&
-    f.vcodec !== 'none'
+    Boolean(f.url) && (f.protocol === 'https' || f.protocol === 'http')
   );
 }
 

@@ -14,9 +14,48 @@ const LOCAL_BIN = path.join(REPO_ROOT, 'bin', BIN_NAME);
 const COOKIES_FILE = path.join(REPO_ROOT, 'cookies', 'youtube.txt');
 const PLUGIN_DIR = path.join(REPO_ROOT, 'plugins');
 const JS_RUNTIME = process.env.YTDLP_JS_RUNTIME ?? 'node';
+/**
+ * WARP proxy, used to get past YouTube's datacenter-IP bot check.
+ *
+ * It is not free: everything routed through it pays the tunnel's latency and
+ * bandwidth, measured at ~1.0s to reach Instagram versus ~0.1s direct. It was
+ * applied to every site, so every Instagram, X and Facebook download — tens
+ * of megabytes each — went through a tunnel added for YouTube's benefit.
+ * See PROXIED_HOSTS for which sites actually get it.
+ */
 const PROXY_URL =
   process.env.YTDLP_PROXY ??
   (process.env.NODE_ENV === 'production' ? 'http://127.0.0.1:40000' : undefined);
+
+/**
+ * Hosts that need the proxy. Only YouTube refuses this server's IP outright;
+ * every other supported site serves a datacenter IP perfectly well, so they
+ * go direct and keep the bandwidth.
+ *
+ * Set YTDLP_PROXY_ALL=1 to force the old behaviour of proxying everything,
+ * should another site start blocking.
+ */
+const PROXIED_HOSTS = [
+  'youtube.com',
+  'youtu.be',
+  'youtube-nocookie.com',
+  'ytimg.com',
+];
+
+const PROXY_ALL = process.env.YTDLP_PROXY_ALL === '1';
+
+/** True when this URL's host is one the proxy exists for. */
+function shouldProxy(url: string): boolean {
+  if (!PROXY_URL?.trim()) return false;
+  if (PROXY_ALL) return true;
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+    return PROXIED_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+  } catch {
+    // An unparseable URL is yt-dlp's problem to report, not ours to proxy.
+    return false;
+  }
+}
 /**
  * Parallel fragment downloads per request. Higher isn't automatically better:
  * it multiplies per-request load on a shared VPS and can trip rate limiting.
@@ -72,9 +111,9 @@ function cookieArgs(): string[] {
  *   request — see YOUTUBE_CLIENTS for that.
  * - `--extractor-args`: the player-client fallback order (YOUTUBE_CLIENTS).
  */
-function commonArgs(): string[] {
+function commonArgs(url: string): string[] {
   const args = ['--no-warnings', '--js-runtimes', JS_RUNTIME];
-  if (PROXY_URL?.trim()) args.push('--proxy', PROXY_URL.trim());
+  if (shouldProxy(url)) args.push('--proxy', PROXY_URL!.trim());
   if (existsSync(PLUGIN_DIR)) args.push('--plugin-dirs', PLUGIN_DIR);
   if (YOUTUBE_CLIENTS.trim()) {
     args.push('--extractor-args', `youtube:player_client=${YOUTUBE_CLIENTS}`);
@@ -291,7 +330,7 @@ export async function extractInfo(
     // yt-dlp finds no formats for them. Without this the whole extraction
     // fails and the usable videos are lost too.
     '--ignore-errors',
-    ...commonArgs(),
+    ...commonArgs(url),
     url,
   ]);
 
@@ -402,7 +441,7 @@ function downloadArgs(
     ...(playlistItem
       ? ['--yes-playlist', '--playlist-items', String(playlistItem)]
       : ['--no-playlist']),
-    ...commonArgs(),
+    ...commonArgs(url),
     '-o',
     output,
     url,
