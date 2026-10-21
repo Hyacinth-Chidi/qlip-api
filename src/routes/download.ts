@@ -95,10 +95,20 @@ export async function downloadRoute(app: FastifyInstance) {
       );
     };
 
+    // Stage timings: which path a download took and where the time went is
+    // otherwise invisible, and guessing at that has cost real debugging time.
+    const t0 = Date.now();
+    const since = () => Date.now() - t0;
+
     // Facebook's formats carry no codec information, so a byte-for-byte copy
     // can produce a file whose real contents don't match the .mp4 label we
     // put on it. Those go through ffmpeg to be rebuilt as a known-good MP4.
     const viaFfmpeg = needsAssembly(formatId) || needsRemux(formatId);
+
+    request.log.info(
+      { formatId, viaFfmpeg, cached: Boolean(lookupTarget(url, formatId)) },
+      `download start (path=${viaFfmpeg ? 'ffmpeg' : 'direct'})`
+    );
 
     // Fast path: extraction already resolved this format's media URL, so
     // proxy the CDN directly. Spawning yt-dlp here instead makes it re-fetch
@@ -113,6 +123,10 @@ export async function downloadRoute(app: FastifyInstance) {
             const len = upstream.headers.get('content-length');
             if (len) reply.header('Content-Length', len);
             applyMediaHeaders();
+            request.log.info(
+              { ms: since(), bytes: len },
+              'direct CDN stream — first byte'
+            );
             return reply.send(Readable.fromWeb(upstream.body as never));
           }
           // A non-OK response usually means the signed URL expired; fall
@@ -148,6 +162,10 @@ export async function downloadRoute(app: FastifyInstance) {
       });
 
       applyMediaHeaders();
+      request.log.info(
+        { ms: since() },
+        'spawned yt-dlp (no cached url) — streaming'
+      );
       return reply.send(handle.stream);
     }
 
@@ -174,6 +192,11 @@ export async function downloadRoute(app: FastifyInstance) {
       request.log.error(err);
       return reply.code(500).send({ error: 'Unexpected server error.' });
     }
+
+    request.log.info(
+      { ms: since(), bytes: temp.sizeBytes },
+      'ffmpeg assemble complete — streaming temp file'
+    );
 
     // Known up front now, so the app gets real progress instead of an
     // estimate.

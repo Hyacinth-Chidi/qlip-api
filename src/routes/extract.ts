@@ -39,7 +39,9 @@ export async function extractRoute(app: FastifyInstance) {
     }
 
     try {
+      const t0 = Date.now();
       const info = await extractInfo(url);
+      const extractMs = Date.now() - t0;
 
       // Remember where each format's bytes live. The download endpoint can
       // then stream straight from the CDN instead of making yt-dlp resolve
@@ -96,6 +98,16 @@ export async function extractRoute(app: FastifyInstance) {
         };
       }
 
+      const sizeStart = Date.now();
+      const qualities = await fillMissingSizes(
+        buildQualityOptions(info),
+        info.formats
+      );
+      request.log.info(
+        { extractMs, sizeProbeMs: Date.now() - sizeStart, options: qualities.length },
+        'extract complete'
+      );
+
       return {
         type: 'single' as const,
         title: info.title,
@@ -103,10 +115,7 @@ export async function extractRoute(app: FastifyInstance) {
         duration: info.duration ?? null,
         sourceExtractor: info.extractor_key,
         sourceUrl: info.webpage_url,
-        qualities: await fillMissingSizes(
-          buildQualityOptions(info),
-          info.formats
-        ),
+        qualities,
       };
     } catch (err) {
       if (err instanceof YtDlpError) {

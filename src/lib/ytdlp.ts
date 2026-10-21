@@ -489,8 +489,16 @@ const UNPLAYABLE_CODECS = new Set(['av01', 'av1', 'vp9', 'vp09', 'hevc', 'h265']
  * beyond one fast ffprobe.
  */
 async function ensurePlayableCodec(filePath: string): Promise<string> {
+  const probeStart = Date.now();
   const codec = await probeVideoCodec(filePath);
-  if (!codec || !UNPLAYABLE_CODECS.has(codec)) return filePath;
+  if (!codec || !UNPLAYABLE_CODECS.has(codec)) {
+    console.log(
+      `[download] codec=${codec ?? 'unknown'} ok, no transcode (probe ${Date.now() - probeStart}ms)`
+    );
+    return filePath;
+  }
+  console.log(`[download] codec=${codec} needs transcode to h264 — starting`);
+  const transcodeStart = Date.now();
 
   const outPath = filePath.replace(/\.[^.]+$/, '') + '.h264.mp4';
   const ok = await new Promise<boolean>((resolve) => {
@@ -514,6 +522,9 @@ async function ensurePlayableCodec(filePath: string): Promise<string> {
     child.on('close', (code) => resolve(code === 0));
   });
 
+  console.log(
+    `[download] transcode ${ok ? 'done' : 'FAILED'} in ${Date.now() - transcodeStart}ms`
+  );
   // On failure keep the original: an unplayable file beats no file.
   return ok && existsSync(outPath) ? outPath : filePath;
 }

@@ -11,7 +11,12 @@ const HOST = process.env.HOST ?? '0.0.0.0';
 const app = Fastify({
   logger:
     process.env.NODE_ENV === 'production'
-      ? true
+      ? {
+          // Readable timestamps: the default is epoch milliseconds, which
+          // makes working out how long a download actually took needlessly
+          // hard when reading logs.
+          timestamp: () => `,"time":"${new Date().toISOString()}"`,
+        }
       : { transport: { target: 'pino-pretty' } },
 });
 
