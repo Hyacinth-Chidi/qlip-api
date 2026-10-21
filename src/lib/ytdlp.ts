@@ -476,7 +476,16 @@ async function probeVideoCodec(filePath: string): Promise<string | null> {
 }
 
 /** Codecs consumer players and editors reliably refuse. */
-const UNPLAYABLE_CODECS = new Set(['av01', 'av1', 'vp9', 'vp09', 'hevc', 'h265']);
+/**
+ * Only codecs that genuinely fail to play, measured rather than assumed.
+ *
+ * VP9 was on this list and should not have been: VLC, Android and every
+ * modern player handle it, Instagram serves it for everything, and including
+ * it put a ~2 minute re-encode in front of every Instagram download. The
+ * error that started this was specifically `av01`. HEVC stays because
+ * consumer playback for it is genuinely patchy.
+ */
+const UNPLAYABLE_CODECS = new Set(['av01', 'av1', 'hevc', 'h265']);
 
 /**
  * Transcodes to H.264 only when the file really needs it.

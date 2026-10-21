@@ -9,9 +9,16 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const WORKER_SCRIPT = path.join(REPO_ROOT, 'scripts', 'extract_worker.py');
 const VENV_PYTHON = path.join(REPO_ROOT, '.venv', 'bin', 'python3');
 
-/** Per-request ceiling; a wedged extractor must not hold a slot forever. */
+/**
+ * Per-request ceiling; a wedged extractor must not hold a slot forever.
+ *
+ * Kept short because a timeout is not the end of the attempt: it kills the
+ * worker and the caller then spawns yt-dlp, so the real cost of waiting is
+ * this value *plus* a full spawn. At 20s that produced a 27s extraction.
+ * Most successful extractions finish in 2-4s.
+ */
 const REQUEST_TIMEOUT_MS = Number(
-  process.env.YTDLP_EXTRACT_TIMEOUT_MS ?? 20000
+  process.env.YTDLP_EXTRACT_TIMEOUT_MS ?? 9000
 );
 
 interface Pending {
