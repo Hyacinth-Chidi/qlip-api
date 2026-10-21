@@ -247,24 +247,39 @@ export async function extractInfo(
   // Try the long-lived worker first: it skips yt-dlp's ~1.5s import and
   // reuses HTTP connections. Any failure falls through to spawning the
   // binary, which is slower but always available.
+  //
+  // Both stages are timed separately. A single `extractMs` can't distinguish
+  // "the site was slow" from "the worker burned its whole timeout and then we
+  // spawned anyway", and guessing between those has already cost several
+  // rounds of wrong diagnosis.
+  const tWorker = Date.now();
   try {
     const info = await extractWorker.extract(url, workerOpts());
     if (info && typeof info === 'object') {
       return info as YtDlpInfo | YtDlpPlaylist;
     }
+    console.warn(
+      `[extract] worker returned no usable data in ${Date.now() - tWorker}ms`
+    );
   } catch (err) {
     // A genuine extraction failure (private video, bot check) would also
     // fail when spawned, but the retry is cheap relative to a wrong answer
     // and keeps worker problems from looking like site problems.
     workerFallbacks++;
-    if (workerFallbacks === 1 || workerFallbacks % 25 === 0) {
+    // Log the first few in full: the previous "1st and every 25th" rule meant
+    // a worker that failed on every request reported once and then went
+    // quiet, which hid exactly the problem worth seeing.
+    if (workerFallbacks <= 5 || workerFallbacks % 25 === 0) {
       console.warn(
-        `[extract] worker unavailable, spawning yt-dlp instead (${workerFallbacks}x): ${
+        `[extract] worker failed in ${Date.now() - tWorker}ms, spawning yt-dlp (${workerFallbacks}x): ${
           (err as Error).message
         }`
       );
     }
   }
+
+  const workerMs = Date.now() - tWorker;
+  const tSpawn = Date.now();
 
   const { stdout, stderr } = await runCapture([
     '-J',
@@ -285,6 +300,10 @@ export async function extractInfo(
   // when every item failed). runCapture resolves in that case so partial
   // successes survive, so the parse has to be the thing that fails cleanly —
   // otherwise a SyntaxError escapes as a 500 instead of a handled 422.
+  console.warn(
+    `[extract] fallback spawn took ${Date.now() - tSpawn}ms (worker stage ${workerMs}ms before it)`
+  );
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout);

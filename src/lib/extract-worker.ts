@@ -139,8 +139,33 @@ class ExtractWorker {
     });
   }
 
-  /** Rejects if the worker is unavailable, errors, or times out. */
+  /**
+   * Rejects if the worker is unavailable, errors, or times out.
+   *
+   * Retries once on failure before giving up. A timeout kills the process, so
+   * the retry runs against a freshly started worker with a clean connection
+   * pool — which is both cheaper than the caller's full yt-dlp spawn and
+   * fixes the case where only the pooled state was bad.
+   */
   async extract(url: string, opts?: Record<string, unknown>): Promise<unknown> {
+    try {
+      return await this.attempt(url, opts);
+    } catch (first) {
+      // No point retrying when there is no usable Python/yt_dlp at all: that
+      // verdict is permanent and `attempt` would return instantly either way.
+      if (this.unavailable) throw first;
+      try {
+        return await this.attempt(url, opts);
+      } catch {
+        throw first; // report the original cause, not the retry's
+      }
+    }
+  }
+
+  private async attempt(
+    url: string,
+    opts?: Record<string, unknown>
+  ): Promise<unknown> {
     if (!(await this.ensureStarted()) || !this.child) {
       throw new Error('extract worker unavailable');
     }
