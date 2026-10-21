@@ -191,6 +191,8 @@ export interface YtDlpFormat {
   protocol?: string;
   /** Direct media URL, present for progressive formats. */
   url?: string;
+  /** Headers the CDN requires (Referer, User-Agent); 403s without them. */
+  http_headers?: Record<string, string>;
 }
 
 /**

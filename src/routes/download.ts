@@ -1,4 +1,5 @@
 import { createReadStream } from 'node:fs';
+import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import {
   streamDownload,
@@ -8,6 +9,7 @@ import {
   isFfmpegAvailable,
   YtDlpError,
 } from '../lib/ytdlp.js';
+import { lookupTarget } from '../lib/direct-stream.js';
 
 interface DownloadQuery {
   url?: string;
@@ -97,6 +99,33 @@ export async function downloadRoute(app: FastifyInstance) {
     // can produce a file whose real contents don't match the .mp4 label we
     // put on it. Those go through ffmpeg to be rebuilt as a known-good MP4.
     const viaFfmpeg = needsAssembly(formatId) || needsRemux(formatId);
+
+    // Fast path: extraction already resolved this format's media URL, so
+    // proxy the CDN directly. Spawning yt-dlp here instead makes it re-fetch
+    // and re-parse the source page — about 4.5s before the first byte, which
+    // the user experiences as the app freezing after tapping Download.
+    if (!viaFfmpeg) {
+      const target = lookupTarget(url, formatId);
+      if (target) {
+        try {
+          const upstream = await fetch(target.url, { headers: target.headers });
+          if (upstream.ok && upstream.body) {
+            const len = upstream.headers.get('content-length');
+            if (len) reply.header('Content-Length', len);
+            applyMediaHeaders();
+            return reply.send(Readable.fromWeb(upstream.body as never));
+          }
+          // A non-OK response usually means the signed URL expired; fall
+          // through to yt-dlp, which will mint a fresh one.
+          request.log.warn(
+            { status: upstream.status, formatId },
+            'direct stream rejected, falling back to yt-dlp'
+          );
+        } catch (err) {
+          request.log.warn(err, 'direct stream failed, falling back to yt-dlp');
+        }
+      }
+    }
 
     // Plain single-file formats stream straight through: no ffmpeg, no disk,
     // and the file arrives byte-for-byte as the site served it.

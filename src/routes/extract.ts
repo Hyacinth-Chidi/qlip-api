@@ -7,6 +7,7 @@ import {
 } from '../lib/ytdlp.js';
 import { buildQualityOptions } from '../lib/formats.js';
 import { fillMissingSizes } from '../lib/probe-size.js';
+import { rememberTargets } from '../lib/direct-stream.js';
 
 interface ExtractBody {
   url?: string;
@@ -39,6 +40,17 @@ export async function extractRoute(app: FastifyInstance) {
 
     try {
       const info = await extractInfo(url);
+
+      // Remember where each format's bytes live. The download endpoint can
+      // then stream straight from the CDN instead of making yt-dlp resolve
+      // this same page again, which cost ~4.5s before the first byte.
+      if (isPlaylist(info)) {
+        for (const entry of info.entries ?? []) {
+          if (entry?.formats) rememberTargets(url, entry.formats);
+        }
+      } else if (info.formats) {
+        rememberTargets(url, info.formats);
+      }
 
       if (isPlaylist(info)) {
         const all = info.entries ?? [];
