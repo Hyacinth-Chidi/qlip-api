@@ -8,8 +8,13 @@ import {
   needsRemux,
   isFfmpegAvailable,
   YtDlpError,
+  type TempDownload,
 } from '../lib/ytdlp.js';
 import { lookupTarget } from '../lib/direct-stream.js';
+import {
+  cachedAssembleParts,
+  assembleFromCache,
+} from '../lib/fast-assemble.js';
 
 interface DownloadQuery {
   url?: string;
@@ -179,9 +184,33 @@ export async function downloadRoute(app: FastifyInstance) {
       });
     }
 
-    let temp;
+    let temp: TempDownload | undefined;
+
+    // Fast path: extraction cached both component urls, so ffmpeg can read
+    // them straight from the CDN. Handing the page url to yt-dlp instead makes
+    // it re-fetch and re-parse the source page first, which dominated the
+    // time — a 2.1 MB reel took 9.3s, nearly all of it that redundant work.
+    const parts = cachedAssembleParts(url, formatId);
+    if (parts) {
+      const tFast = Date.now();
+      try {
+        temp = await assembleFromCache(parts);
+        request.log.info(
+          { ms: since(), assembleMs: Date.now() - tFast, bytes: temp.sizeBytes },
+          'fast assemble from cached CDN urls'
+        );
+      } catch (err) {
+        // Expired signed urls are the expected failure here; yt-dlp mints
+        // fresh ones, so this stays a slow success rather than an error.
+        request.log.warn(
+          { err: (err as Error).message, ms: Date.now() - tFast },
+          'fast assemble failed, falling back to yt-dlp'
+        );
+      }
+    }
+
     try {
-      temp = await downloadToTemp(url, formatId, itemIndex);
+      temp ??= await downloadToTemp(url, formatId, itemIndex);
     } catch (err) {
       if (err instanceof YtDlpError) {
         request.log.error({ stderr: err.stderr, url, formatId }, err.message);
