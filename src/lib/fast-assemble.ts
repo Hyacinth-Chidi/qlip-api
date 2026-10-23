@@ -4,13 +4,18 @@ import { mkdtemp, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { lookupTarget } from './direct-stream.js';
-import { proxyFor, type TempDownload } from './ytdlp.js';
+import { proxyFor, streamFormat, type TempDownload } from './ytdlp.js';
 
 type Parts = {
   video: string;
   audio: string;
   headers: Record<string, string>;
-  /** Largest range the CDN will serve per request; unset = no limit. */
+  /** The two format ids, for when yt-dlp has to fetch the tracks itself. */
+  ids: [string, string];
+  /**
+   * yt-dlp's chunk size for these urls. Its presence marks a CDN (YouTube)
+   * that won't serve the whole file to a plain HTTP client; see feedYtDlp.
+   */
   chunkSize?: number;
 };
 
@@ -42,6 +47,7 @@ export function cachedAssembleParts(
     video: video.url,
     audio: audio.url,
     headers: video.headers,
+    ids: [ids[0], ids[1]],
     chunkSize: video.chunkSize ?? audio.chunkSize,
   };
 }
@@ -100,76 +106,43 @@ async function contentLength(
 }
 
 /**
- * Writes a url's bytes into `sink` as a sequence of bounded ranges.
+ * Writes one track, fetched by yt-dlp, into `sink`.
  *
- * YouTube serves some clients' urls (VISIONOS, measured) only in ranges of at
- * most `http_chunk_size`: a 0-1000 or 0-10MB request gets 206, while an
- * open-ended or unranged one gets 403. ffmpeg always opens with an open
- * range, so it was refused on every such download however the proxy was
- * passed. This does what yt-dlp does — fetch in chunks — and hands ffmpeg the
- * bytes over a pipe.
+ * YouTube serves its media urls only in bounded ranges, and beyond that
+ * refused plain ranged requests partway through: measured on one download,
+ * curl got 403 on the first 10 MB of audio and on the second 10 MB of video,
+ * while yt-dlp fetched the same formats completely. Rather than chase what the
+ * CDN checks, yt-dlp does the fetching and ffmpeg reads its stdout.
  *
- * One curl process with `--next` between ranges, so the connection through
- * the proxy is reused instead of paying a fresh TLS handshake per chunk.
- * The sink is only ended on success: on failure ffmpeg must not see a clean
- * EOF, or it would finalise a truncated file as if it were complete.
+ * Each process re-resolves the page, which costs seconds before the first
+ * byte — far better than building the whole file first, which took 113s for
+ * a 760 MB video. The sink is ended only on a clean exit: ffmpeg must never
+ * see EOF on a truncated track, or it would finalise a short file as whole.
  */
-async function feedChunked(
-  url: string,
-  headers: Record<string, string>,
-  proxy: string | null,
-  chunkSize: number,
+async function feedYtDlp(
+  sourceUrl: string,
+  formatId: string,
   sink: Writable,
-  track: (child: ChildProcess) => void
+  track: (kill: () => void) => void
 ): Promise<void> {
-  const total = await contentLength(url, headers, proxy);
-  if (!total) throw new Error('could not determine media length for chunked fetch');
-
-  const perTransfer = ['-s', '-f', ...curlHeaders(headers), ...(proxy ? ['-x', proxy] : [])];
-  const args = ['--fail-early'];
-  for (let start = 0; start < total; start += chunkSize) {
-    const end = Math.min(start + chunkSize, total) - 1;
-    if (start > 0) args.push('--next');
-    args.push(
-      ...perTransfer,
-      '-r', `${start}-${end}`,
-      // One status line per range, on stderr so it can't mix with the media
-      // on stdout. "curl exit 22" alone never said which range was refused.
-      '-w', `%{stderr}${start}-${end}: %{http_code}\n`,
-      url
-    );
-  }
-
-  const curl = spawn('curl', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-  track(curl);
-  let err = '';
-  curl.stderr.on('data', (c) => (err += c));
+  const handle = streamFormat(sourceUrl, formatId);
+  track(handle.kill);
 
   // ffmpeg dying closes this pipe; stop fetching rather than block forever.
   let sinkErr: Error | null = null;
   sink.on('error', (e) => {
     sinkErr = e;
-    curl.kill('SIGKILL');
+    handle.kill();
   });
-  curl.stdout.pipe(sink, { end: false });
+  handle.stream.pipe(sink, { end: false });
 
-  await new Promise<void>((resolve, reject) => {
-    curl.on('error', (e) => reject(new Error(`Failed to start curl: ${e.message}`)));
-    curl.on('close', (code) => {
-      if (sinkErr) reject(sinkErr);
-      else if (code === 0) resolve();
-      else {
-        // The refused range is the last status line written.
-        const lines = err.trim().split('\n');
-        reject(
-          new Error(
-            `chunked fetch failed (curl exit ${code}, total ${total}, ` +
-              `${lines.length} ranges tried, last ${lines.at(-1)})`
-          )
-        );
-      }
-    });
-  });
+  try {
+    await handle.done;
+  } catch (e) {
+    const lastLine = ((e as { stderr?: string }).stderr ?? '').trim().split('\n').at(-1);
+    throw new Error(`yt-dlp fetch of ${formatId} failed: ${(e as Error).message}; ${lastLine}`);
+  }
+  if (sinkErr) throw sinkErr;
   sink.end();
 }
 
@@ -177,11 +150,12 @@ async function feedChunked(
  * Starts ffmpeg muxing both parts with the given output arguments.
  *
  * Without a chunk size ffmpeg opens the urls itself, with the proxy passed as
- * `-http_proxy`. With one, Node feeds it bounded ranges on fds 3 and 4.
+ * `-http_proxy`. With one (YouTube), yt-dlp fetches each track and ffmpeg
+ * reads them on fds 3 and 4.
  *
  * `done` resolves when the mux finished cleanly or was stopped through
  * `kill()`, and rejects with the most specific cause otherwise — including a
- * failed chunk fetch, which must fail the download even if ffmpeg itself
+ * failed track fetch, which must fail the download even if ffmpeg itself
  * would have exited cleanly on the truncated input.
  */
 function spawnMux(
@@ -220,27 +194,26 @@ function spawnMux(
     }
   );
 
-  const feeders: ChildProcess[] = [];
+  const feeders: Array<() => void> = [];
   let intentional = false;
   let feedErr: Error | null = null;
   const kill = () => {
     intentional = true;
     child.kill('SIGKILL');
-    for (const f of feeders) f.kill('SIGKILL');
+    for (const stop of feeders) stop();
   };
 
   if (chunked) {
-    const track = (c: ChildProcess) => feeders.push(c);
-    const feed = (url: string, fd: number) =>
-      feedChunked(url, parts.headers, proxy, parts.chunkSize!, child.stdio[fd] as Writable, track)
-        .catch((e: Error) => {
-          if (intentional) return;
-          feedErr ??= e;
-          child.kill('SIGKILL');
-          for (const f of feeders) f.kill('SIGKILL');
-        });
-    void feed(parts.video, 3);
-    void feed(parts.audio, 4);
+    const track = (stop: () => void) => feeders.push(stop);
+    const feed = (formatId: string, fd: number) =>
+      feedYtDlp(sourceUrl, formatId, child.stdio[fd] as Writable, track).catch((e: Error) => {
+        if (intentional) return;
+        feedErr ??= e;
+        child.kill('SIGKILL');
+        for (const stop of feeders) stop();
+      });
+    void feed(parts.ids[0], 3);
+    void feed(parts.ids[1], 4);
   }
 
   let err = '';
@@ -326,7 +299,7 @@ export async function assembleFromCache(
 export async function streamFromCache(
   sourceUrl: string,
   parts: Parts,
-  firstByteTimeoutMs = 30_000
+  firstByteTimeoutMs = 60_000
 ): Promise<{ stream: Readable; done: Promise<void>; kill: () => void }> {
   const mux = spawnMux(
     sourceUrl,

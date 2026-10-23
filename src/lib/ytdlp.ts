@@ -531,6 +531,48 @@ export function streamDownload(
   };
 }
 
+/**
+ * Streams exactly one format — one track of a DASH pair — to stdout.
+ *
+ * Used to feed ffmpeg when the CDN won't serve its urls to a plain HTTP
+ * client. YouTube media urls refused curl's ranged requests partway through
+ * (a 403 on the first 10 MB of audio, on the second 10 MB of video) while
+ * yt-dlp downloaded the same formats completely, so yt-dlp does the fetching.
+ *
+ * Unlike streamDownload, `done` resolves only on a clean exit: a track that
+ * ends early for any reason must fail the mux, never be finalised short.
+ */
+export function streamFormat(url: string, formatId: string): DownloadHandle {
+  const args = downloadArgs(url, formatId, undefined, '-');
+  // downloadArgs widens -f with fallbacks that can select a merged pair; a
+  // single track has to be exactly that track.
+  args[args.indexOf('-f') + 1] = formatId;
+  // Progress lines would pile up in the stderr buffer over a long download.
+  args.unshift('--no-progress');
+
+  const child = spawn(resolveYtDlpBin(), args, { stdio: ['ignore', 'pipe', 'pipe'] });
+
+  let stderr = '';
+  child.stderr.on('data', (chunk) => (stderr += chunk));
+
+  const done = new Promise<void>((resolve, reject) => {
+    child.on('error', (err) =>
+      reject(new YtDlpError(`Failed to start yt-dlp: ${err.message}`, stderr))
+    );
+    child.on('close', (code, signal) => {
+      if (code === 0) resolve();
+      else reject(new YtDlpError(`yt-dlp exited with ${signal ?? `code ${code}`}`, stderr));
+    });
+  });
+  done.catch(() => {});
+
+  return {
+    stream: child.stdout,
+    done,
+    kill: () => child.kill('SIGKILL'),
+  };
+}
+
 const TEMP_PREFIX = 'qlip-';
 
 /**
