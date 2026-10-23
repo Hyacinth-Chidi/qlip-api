@@ -194,7 +194,7 @@ export async function downloadRoute(app: FastifyInstance) {
     if (parts) {
       const tFast = Date.now();
       try {
-        temp = await assembleFromCache(parts);
+        temp = await assembleFromCache(url, parts);
         request.log.info(
           { ms: since(), assembleMs: Date.now() - tFast, bytes: temp.sizeBytes },
           'fast assemble from cached CDN urls'

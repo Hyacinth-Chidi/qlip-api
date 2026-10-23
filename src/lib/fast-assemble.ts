@@ -3,7 +3,7 @@ import { mkdtemp, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { lookupTarget } from './direct-stream.js';
-import type { TempDownload } from './ytdlp.js';
+import { proxyFor, type TempDownload } from './ytdlp.js';
 
 /**
  * Muxes a DASH video+audio pair straight from the CDN, without yt-dlp.
@@ -47,6 +47,7 @@ function headerArg(headers: Record<string, string>): string[] {
  * before each input — ffmpeg applies them to the next `-i` only.
  */
 export async function assembleFromCache(
+  sourceUrl: string,
   parts: { video: string; audio: string; headers: Record<string, string> },
   timeoutMs = 120_000
 ): Promise<TempDownload> {
@@ -72,10 +73,20 @@ export async function assembleFromCache(
     '-y', filePath,
   ];
 
+  // Google signs its media urls to the IP that requested them, so a url
+  // yt-dlp resolved through WARP returns 403 when ffmpeg fetches it directly
+  // from the server's own IP. ffmpeg has no --proxy flag; it reads the
+  // standard proxy environment variables instead.
+  const proxy = proxyFor(sourceUrl);
+  const env = proxy
+    ? { ...process.env, http_proxy: proxy, https_proxy: proxy }
+    : process.env;
+
   try {
     await new Promise<void>((resolve, reject) => {
       const child = spawn('ffmpeg', args, {
         stdio: ['ignore', 'ignore', 'pipe'],
+        env,
       });
       let err = '';
       child.stderr.on('data', (c) => (err += c));

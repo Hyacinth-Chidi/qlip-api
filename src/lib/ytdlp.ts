@@ -44,8 +44,13 @@ const PROXIED_HOSTS = [
 
 const PROXY_ALL = process.env.YTDLP_PROXY_ALL === '1';
 
+/** The proxy to use for a url, or null when it should go direct. */
+export function proxyFor(url: string): string | null {
+  return shouldProxy(url) ? PROXY_URL!.trim() : null;
+}
+
 /** True when this URL's host is one the proxy exists for. */
-function shouldProxy(url: string): boolean {
+export function shouldProxy(url: string): boolean {
   if (!PROXY_URL?.trim()) return false;
   if (PROXY_ALL) return true;
   try {
