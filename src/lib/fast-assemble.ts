@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import type { Readable } from 'node:stream';
+import { Readable } from 'node:stream';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -40,6 +40,43 @@ function headerArg(headers: Record<string, string>): string[] {
   return ['-headers', entries.map(([k, v]) => `${k}: ${v}\r\n`).join('')];
 }
 
+type Parts = { video: string; audio: string; headers: Record<string, string> };
+
+/**
+ * The two `-i` inputs, each with its own options — ffmpeg applies input
+ * options to the next `-i` only, so they are repeated.
+ *
+ * The proxy is passed as `-http_proxy` rather than through the environment.
+ * Google signs media urls to the IP that requested them, so a url resolved
+ * through WARP 403s from the server's own IP. Setting http_proxy in the env
+ * worked from a shell but not under PM2: the server's own curl reached the
+ * same url through the proxy and ffmpeg was refused moments later. The
+ * explicit option takes the environment out of the question.
+ */
+function inputArgs(sourceUrl: string, parts: Parts): string[] {
+  const proxy = proxyFor(sourceUrl);
+  const perInput = [
+    // Let a transient CDN hiccup retry rather than failing the download.
+    '-reconnect', '1',
+    '-reconnect_streamed', '1',
+    '-reconnect_delay_max', '5',
+    ...headerArg(parts.headers),
+    ...(proxy ? ['-http_proxy', proxy] : []),
+  ];
+  return [...perInput, '-i', parts.video, ...perInput, '-i', parts.audio];
+}
+
+/**
+ * ffmpeg skips the proxy for any host matching `no_proxy`, even when
+ * -http_proxy is given explicitly, so a stray value inherited from the
+ * process manager would quietly undo the option above.
+ */
+function ffmpegEnv(sourceUrl: string): NodeJS.ProcessEnv {
+  if (!proxyFor(sourceUrl)) return process.env;
+  const { no_proxy: _a, NO_PROXY: _b, ...rest } = process.env;
+  return rest;
+}
+
 /**
  * Streams both parts into a faststart MP4.
  *
@@ -49,23 +86,17 @@ function headerArg(headers: Record<string, string>): string[] {
  */
 export async function assembleFromCache(
   sourceUrl: string,
-  parts: { video: string; audio: string; headers: Record<string, string> },
+  parts: Parts,
   timeoutMs = 120_000
 ): Promise<TempDownload> {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'qlip-fast-'));
   const filePath = path.join(dir, 'media.mp4');
   const cleanup = () => rm(dir, { recursive: true, force: true });
 
-  const hdr = headerArg(parts.headers);
   const args = [
     '-nostdin',
     '-loglevel', 'error',
-    // Let a transient CDN hiccup retry rather than failing the download.
-    '-reconnect', '1',
-    '-reconnect_streamed', '1',
-    '-reconnect_delay_max', '5',
-    ...hdr, '-i', parts.video,
-    ...hdr, '-i', parts.audio,
+    ...inputArgs(sourceUrl, parts),
     '-map', '0:v:0',
     '-map', '1:a:0',
     '-c', 'copy',
@@ -73,15 +104,7 @@ export async function assembleFromCache(
     '-movflags', '+faststart',
     '-y', filePath,
   ];
-
-  // Google signs its media urls to the IP that requested them, so a url
-  // yt-dlp resolved through WARP returns 403 when ffmpeg fetches it directly
-  // from the server's own IP. ffmpeg has no --proxy flag; it reads the
-  // standard proxy environment variables instead.
-  const proxy = proxyFor(sourceUrl);
-  const env = proxy
-    ? { ...process.env, http_proxy: proxy, https_proxy: proxy }
-    : process.env;
+  const env = ffmpegEnv(sourceUrl);
 
   try {
     await new Promise<void>((resolve, reject) => {
@@ -136,21 +159,21 @@ export async function assembleFromCache(
  * up front, so the progress bar has no total. Starting immediately is the
  * better trade for a large file.
  *
- * Returns the ffmpeg stdout stream plus a kill handle; the caller pipes it.
+ * Resolves only once ffmpeg has produced its first bytes. With empty_moov
+ * ffmpeg writes nothing until both inputs have opened, so a first byte means
+ * the CDN accepted us. Committing to a 200 any earlier turned a refused input
+ * into a "successful" 0-byte download the caller could no longer fall back
+ * from. Rejects, with ffmpeg's own error, when it exits before writing.
  */
-export function streamFromCache(
+export async function streamFromCache(
   sourceUrl: string,
-  parts: { video: string; audio: string; headers: Record<string, string> }
-): { stream: Readable; done: Promise<void>; kill: () => void } {
-  const hdr = headerArg(parts.headers);
+  parts: Parts,
+  firstByteTimeoutMs = 30_000
+): Promise<{ stream: Readable; done: Promise<void>; kill: () => void }> {
   const args = [
     '-nostdin',
     '-loglevel', 'error',
-    '-reconnect', '1',
-    '-reconnect_streamed', '1',
-    '-reconnect_delay_max', '5',
-    ...hdr, '-i', parts.video,
-    ...hdr, '-i', parts.audio,
+    ...inputArgs(sourceUrl, parts),
     '-map', '0:v:0',
     '-map', '1:a:0',
     '-c', 'copy',
@@ -164,13 +187,13 @@ export function streamFromCache(
     'pipe:1',
   ];
 
-  const proxy = proxyFor(sourceUrl);
   const child = spawn('ffmpeg', args, {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: proxy
-      ? { ...process.env, http_proxy: proxy, https_proxy: proxy }
-      : process.env,
+    env: ffmpegEnv(sourceUrl),
   });
+  const kill = () => {
+    child.kill('SIGKILL');
+  };
 
   let err = '';
   child.stderr.on('data', (c) => (err += c));
@@ -179,19 +202,45 @@ export function streamFromCache(
     child.on('error', (e) =>
       reject(new Error(`Failed to start ffmpeg: ${e.message}`))
     );
-    child.on('close', (code) => {
-      // 255 is ffmpeg's exit code when it is killed, which is what happens
-      // whenever the phone disconnects early — not an error worth reporting.
-      if (code === 0 || code === 255) resolve();
+    child.on('close', (code, signal) => {
+      // Killed is what happens whenever the phone disconnects early — not an
+      // error worth reporting.
+      if (code === 0 || code === 255 || signal === 'SIGKILL') resolve();
       else reject(new Error(`ffmpeg exited ${code}: ${err.slice(0, 400)}`));
     });
   });
+  // Observed below or by the caller; never let it surface as unhandled.
+  done.catch(() => {});
 
-  return {
-    stream: child.stdout!,
-    done,
-    kill: () => child.kill('SIGKILL'),
-  };
+  const it: AsyncIterator<Buffer> = child.stdout![Symbol.asyncIterator]();
+  const timer = setTimeout(kill, firstByteTimeoutMs);
+  let first: IteratorResult<Buffer>;
+  try {
+    first = await it.next();
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (first.done) {
+    kill();
+    await done; // throws ffmpeg's own error when there is one
+    throw new Error(`ffmpeg produced no output within ${firstByteTimeoutMs}ms`);
+  }
+
+  // Hand back a stream that replays the chunk already read, then the rest.
+  const firstChunk = first.value;
+  const stream = Readable.from(
+    (async function* () {
+      yield firstChunk;
+      for (;;) {
+        const next = await it.next();
+        if (next.done) return;
+        yield next.value;
+      }
+    })()
+  );
+
+  return { stream, done, kill };
 }
 
 /**
@@ -208,7 +257,7 @@ export function streamFromCache(
  */
 export async function partsExceed(
   sourceUrl: string,
-  parts: { video: string; audio: string; headers: Record<string, string> },
+  parts: Parts,
   limit: number,
   timeoutMs = 4000
 ): Promise<boolean> {

@@ -208,26 +208,41 @@ export async function downloadRoute(app: FastifyInstance) {
     // minutes for a 600 MB YouTube download at the measured ~4.8 MB/s, which
     // looks exactly like a hang. Smaller files keep the temp-file path, which
     // costs little and preserves an exact Content-Length for the progress bar.
+    // Set when streaming already failed on these urls: the temp-file fast path
+    // would read the same urls and fail the same way, so go to yt-dlp.
+    let fastFailed = false;
+
     if (parts && (await partsExceed(url, parts, STREAM_THRESHOLD_BYTES))) {
-      const handle = streamFromCache(url, parts);
+      const tStream = Date.now();
+      try {
+        // Resolves only after ffmpeg's first bytes, so a refused input lands
+        // in the catch below instead of becoming a 200 with an empty body.
+        const handle = await streamFromCache(url, parts);
 
-      request.raw.on('close', () => {
-        if (request.raw.destroyed) handle.kill();
-      });
-      handle.done.catch((err) => {
-        request.log.error(err, 'streaming assemble failed mid-flight');
-        request.raw.destroy();
-      });
+        request.raw.on('close', () => {
+          if (request.raw.destroyed) handle.kill();
+        });
+        handle.done.catch((err) => {
+          request.log.error(err, 'streaming assemble failed mid-flight');
+          request.raw.destroy();
+        });
 
-      applyMediaHeaders();
-      request.log.info(
-        { ms: since() },
-        'streaming assemble (fragmented mp4) — first byte'
-      );
-      return reply.send(handle.stream);
+        applyMediaHeaders();
+        request.log.info(
+          { ms: since(), firstByteMs: Date.now() - tStream },
+          'streaming assemble (fragmented mp4) — first byte'
+        );
+        return reply.send(handle.stream);
+      } catch (err) {
+        fastFailed = true;
+        request.log.warn(
+          { err: (err as Error).message, ms: Date.now() - tStream },
+          'streaming assemble failed before first byte, falling back to yt-dlp'
+        );
+      }
     }
 
-    if (parts) {
+    if (parts && !fastFailed) {
       const tFast = Date.now();
       try {
         temp = await assembleFromCache(url, parts);
