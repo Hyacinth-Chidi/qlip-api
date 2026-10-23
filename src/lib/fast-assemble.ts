@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import type { Readable } from 'node:stream';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -117,5 +118,128 @@ export async function assembleFromCache(
   } catch (err) {
     await cleanup();
     throw err;
+  }
+}
+
+/**
+ * Muxes both parts straight to a stream, so bytes reach the phone as they
+ * arrive instead of after the whole file is built.
+ *
+ * A normal MP4 puts its index at the end, and `+faststart` moves it to the
+ * front with a second pass — neither can start before the mux finishes. For a
+ * 600 MB YouTube download at the measured ~4.8 MB/s that is about two minutes
+ * during which the browser shows nothing at all, which reads as a hang.
+ *
+ * A fragmented MP4 carries its index per fragment, so it is valid from the
+ * first byte and plays in browsers, on iOS and on Android. Two costs come
+ * with it: the file is a few percent larger, and there is no Content-Length
+ * up front, so the progress bar has no total. Starting immediately is the
+ * better trade for a large file.
+ *
+ * Returns the ffmpeg stdout stream plus a kill handle; the caller pipes it.
+ */
+export function streamFromCache(
+  sourceUrl: string,
+  parts: { video: string; audio: string; headers: Record<string, string> }
+): { stream: Readable; done: Promise<void>; kill: () => void } {
+  const hdr = headerArg(parts.headers);
+  const args = [
+    '-nostdin',
+    '-loglevel', 'error',
+    '-reconnect', '1',
+    '-reconnect_streamed', '1',
+    '-reconnect_delay_max', '5',
+    ...hdr, '-i', parts.video,
+    ...hdr, '-i', parts.audio,
+    '-map', '0:v:0',
+    '-map', '1:a:0',
+    '-c', 'copy',
+    // empty_moov makes the file valid before any media is written;
+    // frag_keyframe starts a new fragment at each keyframe; and
+    // default_base_moof is what Safari and Chrome expect for playback.
+    '-movflags', '+frag_keyframe+empty_moov+default_base_moof',
+    // The container has to be named explicitly: a pipe has no extension to
+    // infer it from.
+    '-f', 'mp4',
+    'pipe:1',
+  ];
+
+  const proxy = proxyFor(sourceUrl);
+  const child = spawn('ffmpeg', args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: proxy
+      ? { ...process.env, http_proxy: proxy, https_proxy: proxy }
+      : process.env,
+  });
+
+  let err = '';
+  child.stderr.on('data', (c) => (err += c));
+
+  const done = new Promise<void>((resolve, reject) => {
+    child.on('error', (e) =>
+      reject(new Error(`Failed to start ffmpeg: ${e.message}`))
+    );
+    child.on('close', (code) => {
+      // 255 is ffmpeg's exit code when it is killed, which is what happens
+      // whenever the phone disconnects early — not an error worth reporting.
+      if (code === 0 || code === 255) resolve();
+      else reject(new Error(`ffmpeg exited ${code}: ${err.slice(0, 400)}`));
+    });
+  });
+
+  return {
+    stream: child.stdout!,
+    done,
+    kill: () => child.kill('SIGKILL'),
+  };
+}
+
+/**
+ * Whether the video part is larger than `limit` bytes.
+ *
+ * Decides between streaming and the temp-file path, so it must be cheap and
+ * must never block the download: anything unexpected returns false, which
+ * keeps the existing temp-file behaviour.
+ *
+ * Uses curl rather than fetch because the request has to take the same route
+ * the media will — the CDN signs urls to the requesting IP — and curl accepts
+ * the proxy directly. Only the video part is measured; the audio track is a
+ * small fraction of the total and the threshold does not need to be exact.
+ */
+export async function partsExceed(
+  sourceUrl: string,
+  parts: { video: string; audio: string; headers: Record<string, string> },
+  limit: number,
+  timeoutMs = 4000
+): Promise<boolean> {
+  const proxy = proxyFor(sourceUrl);
+  const args = [
+    '-s', '-o', '/dev/null',
+    '-w', '%{size_download}',
+    // A ranged GET of one byte: some CDNs refuse HEAD but always answer this,
+    // and Content-Range carries the full length.
+    '-r', '0-0',
+    '-D', '-',
+    '--max-time', String(Math.ceil(timeoutMs / 1000)),
+    ...Object.entries(parts.headers).flatMap(([k, v]) => ['-H', `${k}: ${v}`]),
+    ...(proxy ? ['-x', proxy] : []),
+    parts.video,
+  ];
+
+  try {
+    const out = await new Promise<string>((resolve, reject) => {
+      const child = spawn('curl', args, { stdio: ['ignore', 'pipe', 'ignore'] });
+      let buf = '';
+      child.stdout.on('data', (c) => (buf += c));
+      child.on('error', reject);
+      child.on('close', () => resolve(buf));
+    });
+
+    // "Content-Range: bytes 0-0/12345678" — the total is after the slash.
+    const m = /content-range:\s*bytes\s+\d+-\d+\/(\d+)/i.exec(out);
+    if (!m) return false;
+    return Number(m[1]) > limit;
+  } catch {
+    return false;
   }
 }

@@ -14,6 +14,8 @@ import { lookupTarget } from '../lib/direct-stream.js';
 import {
   cachedAssembleParts,
   assembleFromCache,
+  streamFromCache,
+  partsExceed,
 } from '../lib/fast-assemble.js';
 
 interface DownloadQuery {
@@ -69,6 +71,15 @@ function contentHeaders(ext: string | undefined, name: string | undefined) {
     asciiFilename: `${asciiName}.${safeExt}`,
   };
 }
+
+/**
+ * Above this, assembly streams instead of building a temp file first. 32 MB
+ * is roughly where the wait to first byte starts being noticeable at the
+ * speeds measured from this server.
+ */
+const STREAM_THRESHOLD_BYTES = Number(
+  process.env.QLIP_STREAM_THRESHOLD_BYTES ?? 32 * 1024 * 1024
+);
 
 export async function downloadRoute(app: FastifyInstance) {
   app.get<{ Querystring: DownloadQuery }>('/api/download', async (request, reply) => {
@@ -191,6 +202,31 @@ export async function downloadRoute(app: FastifyInstance) {
     // it re-fetch and re-parse the source page first, which dominated the
     // time — a 2.1 MB reel took 9.3s, nearly all of it that redundant work.
     const parts = cachedAssembleParts(url, formatId);
+
+    // Large files stream as they mux. Waiting for a complete temp file means
+    // no bytes reach the phone until the whole thing is built — about two
+    // minutes for a 600 MB YouTube download at the measured ~4.8 MB/s, which
+    // looks exactly like a hang. Smaller files keep the temp-file path, which
+    // costs little and preserves an exact Content-Length for the progress bar.
+    if (parts && (await partsExceed(url, parts, STREAM_THRESHOLD_BYTES))) {
+      const handle = streamFromCache(url, parts);
+
+      request.raw.on('close', () => {
+        if (request.raw.destroyed) handle.kill();
+      });
+      handle.done.catch((err) => {
+        request.log.error(err, 'streaming assemble failed mid-flight');
+        request.raw.destroy();
+      });
+
+      applyMediaHeaders();
+      request.log.info(
+        { ms: since() },
+        'streaming assemble (fragmented mp4) — first byte'
+      );
+      return reply.send(handle.stream);
+    }
+
     if (parts) {
       const tFast = Date.now();
       try {
