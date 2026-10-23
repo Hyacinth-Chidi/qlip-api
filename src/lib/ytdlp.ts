@@ -267,7 +267,27 @@ export interface YtDlpInfo {
  * The worker equivalents of the CLI flags below. Both paths must behave the
  * same, or a link would resolve differently depending on which one ran.
  */
-function workerOpts(): Record<string, unknown> {
+/**
+ * The worker's equivalent of commonArgs(), and it must stay equivalent.
+ *
+ * These drifted apart: the worker set cookies and player clients but not the
+ * plugin dir, the proxy or the js runtime. On YouTube the proxy is the one
+ * that decides whether extraction works at all. Measured on the server with
+ * the same url and player clients:
+ *
+ *   no proxy      -> "Sign in to confirm you're not a bot"
+ *   plugin only   -> same failure (the bgutil provider registers nothing;
+ *                    `_pot_providers` is empty, so it contributes nothing
+ *                    today and WARP is what actually gets us past the check)
+ *   plugin+proxy  -> 112 formats, heights up to 2160p
+ *
+ * Without it every worker attempt failed with "yt-dlp returned no data", and
+ * each request paid that failure *and* a full fallback spawn: 7-20s per
+ * YouTube extraction, and the SD-only format list users were seeing.
+ *
+ * Takes the url because the proxy is YouTube-only; see shouldProxy.
+ */
+function workerOpts(url: string): Record<string, unknown> {
   const opts: Record<string, unknown> = {
     noplaylist: false,
     playlistend: 50,
@@ -277,6 +297,17 @@ function workerOpts(): Record<string, unknown> {
     },
   };
   if (existsSync(COOKIES_FILE)) opts.cookiefile = COOKIES_FILE;
+
+  // yt-dlp reads plugins from this list the same way --plugin-dirs does.
+  if (existsSync(PLUGIN_DIR)) opts.plugin_dirs = [PLUGIN_DIR];
+
+  if (shouldProxy(url)) opts.proxy = PROXY_URL!.trim();
+
+  // Needed to decipher YouTube's signatures; the CLI passes --js-runtimes.
+  // The library option is a dict of {runtime: {config}}, not the list the
+  // CLI flag accepts — passing a list raises ValueError at construction.
+  if (JS_RUNTIME.trim()) opts.js_runtimes = { [JS_RUNTIME.trim()]: {} };
+
   return opts;
 }
 
@@ -293,7 +324,7 @@ export async function extractInfo(
   // rounds of wrong diagnosis.
   const tWorker = Date.now();
   try {
-    const info = await extractWorker.extract(url, workerOpts());
+    const info = await extractWorker.extract(url, workerOpts(url));
     if (info && typeof info === 'object') {
       return info as YtDlpInfo | YtDlpPlaylist;
     }
