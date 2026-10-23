@@ -130,7 +130,14 @@ async function feedChunked(
   for (let start = 0; start < total; start += chunkSize) {
     const end = Math.min(start + chunkSize, total) - 1;
     if (start > 0) args.push('--next');
-    args.push(...perTransfer, '-r', `${start}-${end}`, url);
+    args.push(
+      ...perTransfer,
+      '-r', `${start}-${end}`,
+      // One status line per range, on stderr so it can't mix with the media
+      // on stdout. "curl exit 22" alone never said which range was refused.
+      '-w', `%{stderr}${start}-${end}: %{http_code}\n`,
+      url
+    );
   }
 
   const curl = spawn('curl', args, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -151,7 +158,16 @@ async function feedChunked(
     curl.on('close', (code) => {
       if (sinkErr) reject(sinkErr);
       else if (code === 0) resolve();
-      else reject(new Error(`chunked fetch failed (curl exit ${code}) ${err.slice(0, 200)}`));
+      else {
+        // The refused range is the last status line written.
+        const lines = err.trim().split('\n');
+        reject(
+          new Error(
+            `chunked fetch failed (curl exit ${code}, total ${total}, ` +
+              `${lines.length} ranges tried, last ${lines.at(-1)})`
+          )
+        );
+      }
     });
   });
   sink.end();
