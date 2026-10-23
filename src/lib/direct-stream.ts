@@ -16,6 +16,8 @@ import type { YtDlpFormat } from './ytdlp.js';
 interface CachedTarget {
   url: string;
   headers: Record<string, string>;
+  /** Largest range the CDN will serve in one request; unset = no limit. */
+  chunkSize?: number;
   expiresAt: number;
 }
 
@@ -71,6 +73,7 @@ export function rememberTargets(sourceUrl: string, formats: YtDlpFormat[]): void
       // The site's own headers (Referer, User-Agent) are often required;
       // without them the CDN returns 403.
       headers: (f.http_headers as Record<string, string>) ?? {},
+      chunkSize: f.downloader_options?.http_chunk_size || undefined,
       expiresAt: now + TTL_MS,
     });
   }

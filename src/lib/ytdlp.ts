@@ -237,6 +237,11 @@ export interface YtDlpFormat {
   url?: string;
   /** Headers the CDN requires (Referer, User-Agent); 403s without them. */
   http_headers?: Record<string, string>;
+  /**
+   * yt-dlp's per-format download hints. `http_chunk_size` means the CDN only
+   * serves this url in bounded ranges: an open-ended request gets 403.
+   */
+  downloader_options?: { http_chunk_size?: number };
 }
 
 /**
