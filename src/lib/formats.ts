@@ -247,8 +247,16 @@ export function buildQualityOptions(info: YtDlpInfo): QualityOption[] {
   // a source without 4K simply yields fewer options instead of a bad match.
   const heights = [...byHeight.keys()].sort((a, b) => b - a);
 
-  const pickInBand = (min: number, max: number): number | undefined =>
-    heights.find((h) => h >= min && h <= max);
+  // Within a band, a widely playable height beats a taller one that isn't.
+  // Instagram offers 1080p only as VP9 but a complete 720p H.264 file too;
+  // taking the tallest regardless handed out VP9, which WhatsApp rejects as
+  // "unsupported format". The cost is that Instagram's HD drops from 1080p
+  // to 720p. Bands with no H.264 at all (YouTube's 4K) still fall back to
+  // the tallest.
+  const pickInBand = (min: number, max: number): number | undefined => {
+    const inBand = heights.filter((h) => h >= min && h <= max);
+    return inBand.find((h) => isWidelyPlayable(byHeight.get(h)!)) ?? inBand[0];
+  };
 
   // HD caps at 1080p: it's the middle "good quality" choice, so letting it
   // resolve to 1440p would put it within a hair of the 4K option's size.

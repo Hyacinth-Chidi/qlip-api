@@ -41,6 +41,11 @@ export function cachedAssembleParts(
   const [video, audio] = ids.map((id) => lookupTarget(sourceUrl, id));
   if (!video || !audio) return null;
 
+  // This path only copies streams. AV1 and HEVC have to be converted to
+  // H.264 to play reliably, which the yt-dlp path does after its codec
+  // probe — returning null sends them there instead of copying them as-is.
+  if (/^(av01|av1|hev1|hvc1|hevc|h265)/i.test(video.vcodec ?? '')) return null;
+
   // Both parts come from the same extraction, so their headers match; the
   // CDN rejects the request without the site's Referer/User-Agent.
   return {

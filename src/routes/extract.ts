@@ -9,6 +9,7 @@ import { buildQualityOptions } from '../lib/formats.js';
 import { fillMissingSizes } from '../lib/probe-size.js';
 import { rememberTargets } from '../lib/direct-stream.js';
 import { lookupExtract, rememberExtract } from '../lib/extract-cache.js';
+import { fillUnlabelledFormats } from '../lib/probe-format.js';
 
 interface ExtractBody {
   url?: string;
@@ -47,7 +48,16 @@ export async function extractRoute(app: FastifyInstance) {
       const cached = lookupExtract(url);
       const info = cached ?? (await extractInfo(url));
       const extractMs = Date.now() - t0;
-      if (!cached) rememberExtract(url, info);
+
+      // Label the formats yt-dlp left blank before caching, so a cache hit
+      // keeps the result. On Instagram these are the only H.264 files.
+      let probeMs = 0;
+      if (!cached) {
+        const tProbe = Date.now();
+        await fillUnlabelledFormats(url, info);
+        probeMs = Date.now() - tProbe;
+        rememberExtract(url, info);
+      }
 
       // Remember where each format's bytes live. The download endpoint can
       // then stream straight from the CDN instead of making yt-dlp resolve
@@ -112,6 +122,7 @@ export async function extractRoute(app: FastifyInstance) {
       request.log.info(
         {
           extractMs,
+          probeMs,
           cacheHit: Boolean(cached),
           sizeProbeMs: Date.now() - sizeStart,
           options: qualities.length,
